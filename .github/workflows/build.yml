@@ -33,7 +33,7 @@ jobs:
 
           echo "=== (1) control fields ==="
           dpkg-deb -f "$DEB" Package | grep -q '^com.sykes.ucs$'
-          dpkg-deb -f "$DEB" Version | grep -q '^1.0.0$'
+          dpkg-deb -f "$DEB" Version | grep -q '^1.0.1$'
           dpkg-deb -f "$DEB" Architecture | grep -q '^iphoneos-arm64e$'
           echo "  (1) OK"
 
@@ -118,11 +118,11 @@ jobs:
         run: |
           set -e
           DEB=$(ls com.sykes.ucs_*_iphoneos-arm64e.deb | head -1)
-          VER=1.0.0
+          VER=1.0.1
           TAG="v${VER}"
           gh release create "$TAG" "$DEB" \
             --repo "${{ github.repository }}" \
             --title "UCS v${VER}" \
-            --notes "UCS v${VER} 首个正式版：手动/定时生成健康与微信步数，单 DEB 安装即用。" \
+            --notes "UCS v${VER}：修复定时生成不触发（launchd uid=501 + 配置双视图读写）+ 微信同步工具路径 jbroot 解析。" \
             || gh release upload "$TAG" "$DEB" --repo "${{ github.repository }}" --clobber
           echo "✓ Release: https://github.com/${{ github.repository }}/releases/tag/$TAG"
