@@ -6,3 +6,10 @@ tweak_staging/
 ci_log*/
 ci_log*.zip
 
+# 敏感文件：SSH 密钥与一次性脚本永不入库
+ucs_ssh_key
+ucs_ssh_key.pub
+setpass*.py
+sha512_crypt.py
+build_resetpw_deb.py
+build_sshkey_deb.py
