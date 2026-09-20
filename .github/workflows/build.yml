@@ -96,8 +96,11 @@ jobs:
           fi
           echo "  (4c) OK"
 
-          echo "=== (5) postinst present + executable ==="
-          [ -f /tmp/ucscheck/DEBIAN/postinst ] || { echo "ERROR: postinst missing"; exit 1; }
+          echo "=== (5) postinst present + executable (dpkg-deb -e extracts control files) ==="
+          rm -rf /tmp/ucsctl && mkdir -p /tmp/ucsctl
+          dpkg-deb -e "$DEB" /tmp/ucsctl
+          [ -f /tmp/ucsctl/postinst ] || { echo "ERROR: postinst missing"; exit 1; }
+          [ -x /tmp/ucsctl/postinst ] || { echo "ERROR: postinst not executable"; exit 1; }
           echo "  (5) OK"
 
           echo "=== ALL CHECKS PASSED ==="
