@@ -10,38 +10,75 @@
 #import <sys/stat.h>
 
 // ================= 共享路径（/var/mobile/Documents 为 mobile 用户共享目录，launchd 脚本与 App 均可见） =================
+// 注意（v1.0.1 修复）：App 沙盒视图下 /var/mobile/Documents 物理落盘到 /rootfs/private/var/mobile/Documents/，
+// 与 launchd 脚本读的真实视图 inode 不同。App 写入保持 /var/mobile/Documents（落 rootfs 视图），
+// 脚本优先读 rootfs 视图、回退真实视图，两侧统一。
 #define UCS_CFG      @"/var/mobile/Documents/ucs_config.plist"
+#define UCS_CFG_ALT  @"/rootfs/private/var/mobile/Documents/ucs_config.plist"
 #define UCS_MARKER   @"/var/mobile/Documents/ucs_wake.marker"
 #define UCS_LASTGEN  @"/var/mobile/Documents/ucs_lastgen.txt"
 #define UCS_LOG      @"/var/mobile/Documents/ucs.log"
 
+// ================= jbroot 路径解析（roothide：把 /var/jb 等映射到真实物理路径） =================
+// 用于 App 沙盒内调用 /var/jb/usr/bin/ 下的工具（killall/uiopen），dlsym 避免链接期符号缺失
+static NSString *JBPath(NSString *path) {
+    static void *jb_sym = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ jb_sym = dlsym(RTLD_DEFAULT, "jbroot"); });
+    if (jb_sym) {
+        typedef const char *(*fn_t)(const char *);
+        fn_t fn = (fn_t)jb_sym;
+        const char *real = fn([path UTF8String]);
+        if (real && *real) return [NSString stringWithUTF8String:real];
+    }
+    return path;
+}
+
+// 多候选探测可执行文件：jbroot 解析后的 /var/jb 路径 -> 原始路径
+static const char *FindTool(NSString *jailPath, NSString *plainPath) {
+    NSString *jb = JBPath(jailPath);
+    if ([[NSFileManager defaultManager] isExecutableFileAtPath:jb]) return jb.UTF8String;
+    if ([[NSFileManager defaultManager] isExecutableFileAtPath:plainPath]) return plainPath.UTF8String;
+    return NULL;
+}
+
 // ================= 日志（追加写入，便于排查） =================
+// v1.0.1：双视图写入（App 沙盒落盘视图 + 真实视图），SSH root 视图也能看到
 void ULog(NSString *fmt, ...) {
     va_list args; va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
     NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:UCS_LOG]) {
-        [fm createFileAtPath:UCS_LOG contents:nil attributes:nil];
-    }
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:UCS_LOG];
-    if (fh) {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
+    NSArray *paths = @[UCS_LOG, @"/rootfs/private/var/mobile/Documents/ucs.log"];
+    for (NSString *p in paths) {
+        if (![fm fileExistsAtPath:p]) {
+            [fm createFileAtPath:p contents:nil attributes:nil];
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
     }
     NSLog(@"UCS %@", msg);
 }
 
 // ================= 配置读写（XML plist，launchd 脚本可用 plutil 读取） =================
+// v1.0.1：读配置双路（先 App 沙盒实际落盘视图，再真实视图），保证与 launchd 脚本一致
 static NSDictionary *UCSLoadConfig(void) {
-    return [NSDictionary dictionaryWithContentsOfFile:UCS_CFG];
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:UCS_CFG];
+    if (d) return d;
+    return [NSDictionary dictionaryWithContentsOfFile:UCS_CFG_ALT];
 }
 
 static void UCSSaveConfig(NSDictionary *dict) {
     [dict writeToFile:UCS_CFG atomically:YES];
     chmod(UCS_CFG.UTF8String, 0666);
+    // 同时写入真实视图，保证 launchd 脚本（root 视图）也能读到最新配置
+    [dict writeToFile:UCS_CFG_ALT atomically:YES];
+    chmod(UCS_CFG_ALT.UTF8String, 0666);
 }
 
 static NSDictionary *UCSDefaultConfig(void) {
@@ -214,27 +251,23 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 // 微信同步：杀微信 -> 等待 -> 重新拉起微信，触发其读取 HealthKit 并上传服务器
 // iOS 上 system() 不可用，改用 posix_spawn（spawn.h 已在文件头引入）
+// v1.0.1：工具路径经 jbroot 解析，App 沙盒视图下 /var/jb 不可直接访问
 + (void)syncWeChat {
     ULog(@"syncWeChat: killing WeChat");
     extern char **environ;
     pid_t pid;
     // 1) 杀微信
     char *kill_argv[] = { (char *)"killall", (char *)"-9", (char *)"WeChat", NULL };
-    int rc1 = posix_spawn(&pid, "/var/jb/usr/bin/killall", NULL, NULL, kill_argv, environ);
-    if (rc1 != 0) {
-        // 回退到 /usr/bin/killall（非 roothide 布局）
-        rc1 = posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, kill_argv, environ);
-    }
-    ULog(@"syncWeChat: kill rc=%d", rc1);
+    const char *kill_path = FindTool(@"/var/jb/usr/bin/killall", @"/usr/bin/killall");
+    int rc1 = kill_path ? posix_spawn(&pid, kill_path, NULL, NULL, kill_argv, environ) : -1;
+    ULog(@"syncWeChat: kill rc=%d (tool=%s)", rc1, kill_path ?: "none");
     // 2) 等待 2 秒让微信完全退出
     usleep(2 * 1000000);
     // 3) 重新拉起微信，触发服务器同步
     char *ui_argv[] = { (char *)"uiopen", (char *)"com.tencent.xin", NULL };
-    int rc2 = posix_spawn(&pid, "/var/jb/usr/bin/uiopen", NULL, NULL, ui_argv, environ);
-    if (rc2 != 0) {
-        rc2 = posix_spawn(&pid, "/usr/bin/uiopen", NULL, NULL, ui_argv, environ);
-    }
-    ULog(@"syncWeChat: uiopen rc=%d", rc2);
+    const char *ui_path = FindTool(@"/var/jb/usr/bin/uiopen", @"/usr/bin/uiopen");
+    int rc2 = ui_path ? posix_spawn(&pid, ui_path, NULL, NULL, ui_argv, environ) : -1;
+    ULog(@"syncWeChat: uiopen rc=%d (tool=%s)", rc2, ui_path ?: "none");
 }
 
 @end
@@ -321,14 +354,22 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 // App 在 mobile 用户上下文运行，自行加载/兜底 LaunchAgent
 // （postinst 以 root 运行 bootstrap 可能失败 exit=45，App 内加载才是 roothide 验证过的方式）
+// v1.0.1：plist 双视图检查 + launchctl 路径 jbroot 解析
 - (void)ensureLaunchAgentLoaded {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
         NSString *plist = @"/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist";
         if (![[NSFileManager defaultManager] fileExistsAtPath:plist]) {
-            ULog(@"ensureLaunchAgent: plist missing: %@", plist);
-            return;
+            // App 沙盒视图：尝试 rootfs 物理视图
+            NSString *alt = @"/rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist";
+            if ([[NSFileManager defaultManager] fileExistsAtPath:alt]) {
+                plist = alt;
+            } else {
+                ULog(@"ensureLaunchAgent: plist missing: %@ (alt %@)", plist, alt);
+                return;
+            }
         }
-        const char *lc = "/var/jb/usr/bin/launchctl";
+        NSString *lcStr = JBPath(@"/var/jb/usr/bin/launchctl");
+        const char *lc = lcStr.UTF8String;
         if (access(lc, X_OK) != 0) lc = "/usr/bin/launchctl";
         pid_t pid;
         // bootstrap 已在运行则先 bootout（幂等）
@@ -338,7 +379,7 @@ static NSDictionary *UCSDefaultConfig(void) {
         char *b2[] = { (char *)"launchctl", (char *)"bootstrap", (char *)"user/foreground", (char *)[plist UTF8String], NULL };
         int rc = posix_spawn(&pid, lc, NULL, NULL, b2, NULL);
         int st = 0; if (rc == 0) waitpid(pid, &st, 0);
-        ULog(@"ensureLaunchAgent: bootstrap rc=%d status=%d", rc, st);
+        ULog(@"ensureLaunchAgent: bootstrap rc=%d status=%d plist=%s", rc, st, plist.UTF8String);
     });
 }
 
@@ -539,7 +580,9 @@ static NSDictionary *UCSDefaultConfig(void) {
     __weak typeof(self) ws = self;
     [self.health generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
         NSString *today = [UCSHealth todayString];
+        // lastgen 双视图写入（App 沙盒视图 + 真实视图）
         [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
         [UCSHealth syncWeChat];
         dispatch_async(dispatch_get_main_queue(), ^{
             ws.busy = NO;
@@ -561,8 +604,9 @@ static NSDictionary *UCSDefaultConfig(void) {
 @implementation UCSAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    // launchd 定时唤醒：marker 存在 -> 自动生成 -> 退出（不弹 UI）
-    if ([[NSFileManager defaultManager] fileExistsAtPath:UCS_MARKER]) {
+    // launchd 定时唤醒：marker 存在 -> 自动生成 -> 退出（不弹 UI）——双视图检查
+    if ([[NSFileManager defaultManager] fileExistsAtPath:UCS_MARKER] ||
+        [[NSFileManager defaultManager] fileExistsAtPath:@"/rootfs/private/var/mobile/Documents/ucs_wake.marker"]) {
         ULog(@"wake by launchd marker");
         [self runAutoIfDue];
         exit(0);
@@ -576,8 +620,9 @@ static NSDictionary *UCSDefaultConfig(void) {
 - (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey,id> *)options {
     if ([url.scheme isEqualToString:@"ucs"]) {
         ULog(@"openURL ucs:// (%@)", url.host ?: @"generate");
-        // 脚本已写入 marker；若因时序未写入则直接按唤醒处理
-        if (![[NSFileManager defaultManager] fileExistsAtPath:UCS_MARKER]) {
+        // 脚本已写入 marker；若因时序未写入则直接按唤醒处理（双视图检查）
+        if (![[NSFileManager defaultManager] fileExistsAtPath:UCS_MARKER] &&
+            ![[NSFileManager defaultManager] fileExistsAtPath:@"/rootfs/private/var/mobile/Documents/ucs_wake.marker"]) {
             [[NSFileManager defaultManager] createFileAtPath:UCS_MARKER contents:nil attributes:nil];
         }
         [self runAutoIfDue];
@@ -587,9 +632,12 @@ static NSDictionary *UCSDefaultConfig(void) {
 }
 
 // 自动生成流程（headless：不弹授权框，不显示 UI；完成后 exit）
+// v1.0.1：marker/lastgen 双视图处理
 - (void)runAutoIfDue {
     @autoreleasepool {
+        // marker 双视图删除（脚本可能只写了一份）
         [[NSFileManager defaultManager] removeItemAtPath:UCS_MARKER error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:@"/rootfs/private/var/mobile/Documents/ucs_wake.marker" error:nil];
 
         NSDictionary *cfg = UCSLoadConfig() ?: UCSDefaultConfig();
         if (![cfg[@"scheduleEnabled"] boolValue]) {
@@ -598,6 +646,9 @@ static NSDictionary *UCSDefaultConfig(void) {
         }
         NSString *today = [UCSHealth todayString];
         NSString *last = [NSString stringWithContentsOfFile:UCS_LASTGEN encoding:NSUTF8StringEncoding error:nil];
+        if (![last isEqualToString:today]) {
+            last = [NSString stringWithContentsOfFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" encoding:NSUTF8StringEncoding error:nil];
+        }
         if ([last isEqualToString:today]) {
             ULog(@"auto skip: already generated today");
             return;
@@ -616,7 +667,9 @@ static NSDictionary *UCSDefaultConfig(void) {
         __block BOOL done = NO;
         [h generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
             ULog(@"auto generate result ok=%d", ok);
+            // lastgen 双视图写入
             [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
             [UCSHealth syncWeChat];
             done = YES;
             CFRunLoopStop(CFRunLoopGetMain());
