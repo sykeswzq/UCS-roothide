@@ -195,142 +195,275 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 @end
 
-// ================= 手动生成界面 =================
-@interface UCSViewController : UIViewController <UITextFieldDelegate>
+// ================= 主界面（对齐旧 UCS：InsetGrouped 三区表格） =================
+@interface HBMainViewController : UITableViewController
 @property (nonatomic, strong) UCSHealth *health;
-@property (nonatomic, strong) UITextField *stepsField;
-@property (nonatomic, strong) UITextField *distField;
-@property (nonatomic, strong) UITextField *flightsField;
-@property (nonatomic, strong) UITextField *timeField;
-@property (nonatomic, strong) UISwitch *schedSwitch;
-@property (nonatomic, strong) UIButton *genButton;
+@property (nonatomic, assign) long steps;
+@property (nonatomic, assign) long walkMeters;   // 0 = 自动按 0.7m/步 换算
+@property (nonatomic, assign) long flights;
+@property (nonatomic, assign) BOOL scheduleOn;
+@property (nonatomic, assign) NSInteger schedHour;
+@property (nonatomic, assign) NSInteger schedMinute;
+@property (nonatomic, assign) BOOL busy;
 @property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIDatePicker *timePicker;
 @end
 
-@implementation UCSViewController
+@implementation HBMainViewController
+
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.title = @"UCS";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.health = [[UCSHealth alloc] init];
 
-    NSDictionary *cfg = UCSLoadConfig();
-    if (!cfg) { cfg = UCSDefaultConfig(); UCSSaveConfig(cfg); }
+    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 0, 48)];
+    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.font = [UIFont systemFontOfSize:13];
+    self.statusLabel.textColor = [UIColor secondaryLabelColor];
+    self.statusLabel.numberOfLines = 0;
+    self.tableView.tableFooterView = self.statusLabel;
 
-    CGFloat w = self.view.bounds.size.width;
-    CGFloat y = 120;
+    [self loadSettings];
+    [self updateStatus:@"点击「生成运动数据」后，步数将写入健康，微信运动自动同步。"];
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, w-40, 32)];
-    title.text = @"UCS 运动数据生成";
-    title.font = [UIFont boldSystemFontOfSize:22];
-    title.textAlignment = NSTextAlignmentCenter;
-    [self.view addSubview:title];
-
-    UILabel *ver = [[UILabel alloc] initWithFrame:CGRectMake(20, 96, w-40, 16)];
-    ver.text = @"v1.0.0 · roothide · arm64e";
-    ver.font = [UIFont systemFontOfSize:12];
-    ver.textColor = [UIColor secondaryLabelColor];
-    ver.textAlignment = NSTextAlignmentCenter;
-    [self.view addSubview:ver];
-
-    // 步数
-    _stepsField = [self fieldWithFrame:CGRectMake(20, y, w-40, 44) placeholder:@"虚拟步数（如 5200）" text:[cfg[@"virtualSteps"] stringValue]];
-    [self.view addSubview:_stepsField];
-    y += 52;
-
-    // 距离（可选，0=自动按 0.7m/步 换算）
-    _distField = [self fieldWithFrame:CGRectMake(20, y, w-40, 44) placeholder:@"步行距离 米（留空=自动换算）" text:[cfg[@"walkDistance"] stringValue]];
-    [self.view addSubview:_distField];
-    y += 52;
-
-    // 楼层（可选，0=不生成）
-    _flightsField = [self fieldWithFrame:CGRectMake(20, y, w-40, 44) placeholder:@"爬楼楼层（留空=0 不生成）" text:[cfg[@"flights"] stringValue]];
-    [self.view addSubview:_flightsField];
-    y += 52;
-
-    // 定时开关
-    UILabel *schedLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w-120, 40)];
-    schedLabel.text = @"每日定时自动生成";
-    [self.view addSubview:schedLabel];
-    _schedSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(w-70, y+5, 60, 30)];
-    _schedSwitch.on = [cfg[@"scheduleEnabled"] boolValue];
-    [self.view addSubview:_schedSwitch];
-    y += 48;
-
-    // 定时时间
-    _timeField = [self fieldWithFrame:CGRectMake(20, y, w-40, 44) placeholder:@"定时时间 HH:mm（如 09:00）" text:cfg[@"scheduleTime"]];
-    _timeField.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
-    [self.view addSubview:_timeField];
-    y += 52;
-
-    // 生成按钮
-    _genButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _genButton.frame = CGRectMake(20, y, w-40, 48);
-    _genButton.backgroundColor = [UIColor systemBlueColor];
-    [_genButton setTitle:@"生成运动数据" forState:UIControlStateNormal];
-    [_genButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _genButton.layer.cornerRadius = 10;
-    [_genButton addTarget:self action:@selector(onGenerate) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_genButton];
-    y += 60;
-
-    // 状态
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w-40, 120)];
-    _statusLabel.numberOfLines = 0;
-    _statusLabel.font = [UIFont systemFontOfSize:13];
-    _statusLabel.textColor = [UIColor secondaryLabelColor];
-    _statusLabel.text = @"点击「生成运动数据」后，步数将写入健康，微信运动自动同步。";
-    [self.view addSubview:_statusLabel];
-
-    // 首次请求 HealthKit 授权
+    // 首次请求 HealthKit 授权（仅首次弹窗）
     if (![self.health isAuthorized]) {
+        __weak typeof(self) ws = self;
         [self.health requestAuth:^(BOOL ok) {
-            self->_statusLabel.text = ok ? @"健康权限已授权" : @"健康权限被拒绝，请到设置中开启";
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [ws updateStatus:ok ? @"健康权限已授权" : @"健康权限被拒绝，请到设置中开启"];
+            });
         }];
     }
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissKB)];
-    [self.view addGestureRecognizer:tap];
 }
 
-- (UITextField *)fieldWithFrame:(CGRect)frame placeholder:(NSString *)ph text:(NSString *)text {
-    UITextField *f = [[UITextField alloc] initWithFrame:frame];
-    f.borderStyle = UITextBorderStyleRoundedRect;
-    f.placeholder = ph;
-    f.text = text;
-    f.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
-    f.delegate = self;
-    return f;
+- (void)loadSettings {
+    NSDictionary *cfg = UCSLoadConfig();
+    if (!cfg) { cfg = UCSDefaultConfig(); UCSSaveConfig(cfg); }
+    self.steps = [cfg[@"virtualSteps"] integerValue];
+    self.walkMeters = [cfg[@"walkDistance"] integerValue];
+    self.flights = [cfg[@"flights"] integerValue];
+    self.scheduleOn = [cfg[@"scheduleEnabled"] boolValue];
+    NSString *t = cfg[@"scheduleTime"];
+    NSArray *parts = [t componentsSeparatedByString:@":"];
+    self.schedHour = parts.count > 0 ? [parts[0] integerValue] : 9;
+    self.schedMinute = parts.count > 1 ? [parts[1] integerValue] : 0;
 }
 
-- (void)dismissKB { [self.view endEditing:YES]; }
-- (BOOL)textFieldShouldReturn:(UITextField *)tf { [tf resignFirstResponder]; return YES; }
-
-- (void)onGenerate {
-    [self.view endEditing:YES];
-    NSInteger steps = [self.stepsField.text integerValue];
-    if (steps <= 0) {
-        self.statusLabel.text = @"请输入有效的虚拟步数（>0）";
-        return;
-    }
-    double dist = [self.distField.text doubleValue];
-    if (dist <= 0) dist = steps * 0.7; // 自动换算
-    NSInteger flights = [self.flightsField.text integerValue];
-
-    // 保存配置（含定时设置）
-    NSString *time = self.timeField.text;
-    if (time.length < 5) time = @"09:00";
+- (void)saveSettings {
     NSDictionary *cfg = @{
-        @"virtualSteps"   : @(steps),
-        @"walkDistance"   : @((NSInteger)dist),
-        @"flights"        : @(flights),
-        @"scheduleEnabled": @(self.schedSwitch.isOn),
-        @"scheduleTime"   : time,
+        @"virtualSteps"   : @(self.steps),
+        @"walkDistance"   : @(self.walkMeters),
+        @"flights"        : @(self.flights),
+        @"scheduleEnabled": @(self.scheduleOn),
+        @"scheduleTime"   : [NSString stringWithFormat:@"%02ld:%02ld", (long)self.schedHour, (long)self.schedMinute],
     };
     UCSSaveConfig(cfg);
+}
 
-    self.genButton.enabled = NO;
-    self.statusLabel.text = [NSString stringWithFormat:@"正在生成：%ld 步 / %.0f 米 / %ld 层...", (long)steps, dist, (long)flights];
+- (void)updateStatus:(NSString *)msg {
+    self.statusLabel.text = msg;
+}
+
+- (double)displayKM {
+    double meters = self.walkMeters > 0 ? (double)self.walkMeters : (double)self.steps * 0.7;
+    return meters / 1000.0;
+}
+
+#pragma mark - Table
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+
+- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
+    if (s == 0) return @"今日数据";
+    if (s == 1) return @"操作";
+    return @"定时生成";
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    if (s == 0) return 3;
+    if (s == 1) return 1;
+    return 2;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"cell"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"cell"];
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.textLabel.textColor = [UIColor labelColor];
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.imageView.tintColor = [UIColor systemOrangeColor];
+
+    if (ip.section == 0) {
+        if (ip.row == 0) {
+            cell.imageView.image = [UIImage systemImageNamed:@"figure.walk"];
+            cell.textLabel.text = @"步数";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld 步", self.steps];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else if (ip.row == 1) {
+            cell.imageView.image = [UIImage systemImageNamed:@"ruler"];
+            cell.textLabel.text = @"距离";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%.3f 公里", [self displayKM]];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            cell.imageView.image = [UIImage systemImageNamed:@"stairs"];
+            cell.textLabel.text = @"楼层";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld 层", self.flights];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
+    } else if (ip.section == 1) {
+        cell.imageView.image = [UIImage systemImageNamed:@"plus.circle.fill"];
+        cell.imageView.tintColor = [UIColor systemGreenColor];
+        cell.textLabel.text = @"生成运动数据";
+        cell.textLabel.textColor = [UIColor systemBlueColor];
+        cell.detailTextLabel.text = nil;
+    } else {
+        if (ip.row == 0) {
+            cell.imageView.image = [UIImage systemImageNamed:@"clock"];
+            cell.textLabel.text = @"每日自动生成";
+            cell.detailTextLabel.text = nil;
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = self.scheduleOn;
+            [sw addTarget:self action:@selector(scheduleSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else {
+            cell.imageView.image = [UIImage systemImageNamed:@"timer"];
+            cell.textLabel.text = @"生成时间";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", (long)self.schedHour, (long)self.schedMinute];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
+    }
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.section == 0 && ip.row == 0) {
+        [self editIntegerWithTitle:@"步数" message:@"设置虚拟步数（在真实步数上累加）" current:self.steps handler:^(long v){
+            self.steps = v;
+            [self saveSettings];
+            [self updateStatus:[NSString stringWithFormat:@"已设置：虚拟步数增量 %ld（点击「生成」按钮生效）", v]];
+            [self.tableView reloadData];
+        }];
+    } else if (ip.section == 0 && ip.row == 1) {
+        [self editIntegerWithTitle:@"距离" message:@"设置步行距离（米，0=自动按 0.7m/步 换算）" current:self.walkMeters handler:^(long v){
+            self.walkMeters = v;
+            [self saveSettings];
+            [self.tableView reloadData];
+        }];
+    } else if (ip.section == 0 && ip.row == 2) {
+        [self editIntegerWithTitle:@"楼层" message:@"设置爬楼层数" current:self.flights handler:^(long v){
+            self.flights = v;
+            [self saveSettings];
+            [self.tableView reloadData];
+        }];
+    } else if (ip.section == 1) {
+        [self generateNow];
+    } else if (ip.section == 2 && ip.row == 1) {
+        [self pickTime];
+    }
+}
+
+- (void)editIntegerWithTitle:(NSString *)title message:(NSString *)message current:(long)current handler:(void(^)(long))handler {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf){
+        tf.keyboardType = UIKeyboardTypeNumberPad;
+        tf.text = [NSString stringWithFormat:@"%ld", current];
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act){
+        long v = [a.textFields.firstObject.text integerValue];
+        if (v < 0) v = 0;
+        handler(v);
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// 滚轮时间选择器（模态导航，对齐旧 UCS）
+- (void)pickTime {
+    UIViewController *pickerVC = [[UIViewController alloc] init];
+    pickerVC.view.backgroundColor = [UIColor systemBackgroundColor];
+    pickerVC.title = @"选择生成时间";
+
+    UIDatePicker *p = [[UIDatePicker alloc] init];
+    p.datePickerMode = UIDatePickerModeTime;
+    p.preferredDatePickerStyle = UIDatePickerStyleWheels;
+    p.translatesAutoresizingMaskIntoConstraints = NO;
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDateComponents *c = [[NSDateComponents alloc] init];
+    c.hour = self.schedHour; c.minute = self.schedMinute;
+    p.date = [cal dateFromComponents:c] ?: [NSDate date];
+    [pickerVC.view addSubview:p];
+    self.timePicker = p;
+    [NSLayoutConstraint activateConstraints:@[
+        [p.leadingAnchor constraintEqualToAnchor:pickerVC.view.leadingAnchor],
+        [p.trailingAnchor constraintEqualToAnchor:pickerVC.view.trailingAnchor],
+        [p.centerYAnchor constraintEqualToAnchor:pickerVC.view.centerYAnchor],
+        [p.heightAnchor constraintEqualToConstant:216]
+    ]];
+
+    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithTitle:@"完成"
+                                                            style:UIBarButtonItemStyleDone
+                                                           target:self
+                                                           action:@selector(pickTimeDone:)];
+    UIBarButtonItem *cancel = [[UIBarButtonItem alloc] initWithTitle:@"取消"
+                                                              style:UIBarButtonItemStylePlain
+                                                             target:self
+                                                             action:@selector(dismissPicker)];
+    pickerVC.navigationItem.rightBarButtonItem = done;
+    pickerVC.navigationItem.leftBarButtonItem = cancel;
+
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:pickerVC];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)pickTimeDone:(id)sender {
+    UIDatePicker *p = self.timePicker;
+    if (p) {
+        NSCalendar *c2 = [NSCalendar currentCalendar];
+        NSDateComponents *cc = [c2 components:NSCalendarUnitHour|NSCalendarUnitMinute fromDate:p.date];
+        self.schedHour = cc.hour;
+        self.schedMinute = cc.minute;
+        [self saveSettings];
+        [self.tableView reloadData];
+        [self updateStatus:[NSString stringWithFormat:@"已设置每日 %02ld:%02ld 生成", (long)self.schedHour, (long)self.schedMinute]];
+    }
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)dismissPicker {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)scheduleSwitchChanged:(UISwitch *)sender {
+    self.scheduleOn = sender.isOn;
+    [self saveSettings];
+    [self updateStatus:self.scheduleOn
+        ? [NSString stringWithFormat:@"已开启每日 %02ld:%02ld 定时生成", (long)self.schedHour, (long)self.schedMinute]
+        : @"已关闭定时"];
+}
+
+- (void)generateNow {
+    if (self.busy) return;
+    if (self.steps <= 0) {
+        [self updateStatus:@"请先设置有效的虚拟步数（>0）"];
+        return;
+    }
+    long steps = self.steps;
+    double dist = self.walkMeters > 0 ? (double)self.walkMeters : (double)steps * 0.7;
+    long flights = self.flights;
+
+    self.busy = YES;
+    [self updateStatus:[NSString stringWithFormat:@"正在生成：%ld 步 / %.0f 米 / %ld 层...", (long)steps, dist, (long)flights]];
 
     __weak typeof(self) ws = self;
     [self.health generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
@@ -338,10 +471,11 @@ static NSDictionary *UCSDefaultConfig(void) {
         [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
         [UCSHealth syncWeChat];
         dispatch_async(dispatch_get_main_queue(), ^{
-            ws.genButton.enabled = YES;
-            ws.statusLabel.text = ok
+            ws.busy = NO;
+            [ws updateStatus:ok
                 ? [NSString stringWithFormat:@"生成成功：%ld 步 / %.0f 米 / %ld 层\n已写入健康，微信运动已重新拉起同步。", (long)steps, dist, (long)flights]
-                : @"生成失败，请查看日志 /var/mobile/Documents/ucs.log";
+                : @"生成失败，请查看日志 /var/mobile/Documents/ucs.log"];
+            [ws.tableView reloadData];
         });
     }];
 }
@@ -363,7 +497,7 @@ static NSDictionary *UCSDefaultConfig(void) {
         exit(0);
     }
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    self.window.rootViewController = [[UCSViewController alloc] init];
+    self.window.rootViewController = [[HBMainViewController alloc] init];
     [self.window makeKeyAndVisible];
     return YES;
 }
