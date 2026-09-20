@@ -2,3 +2,7 @@
 staging/
 tweak_staging/
 .DS_Store
+
+ci_log*/
+ci_log*.zip
+
