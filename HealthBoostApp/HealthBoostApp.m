@@ -5,6 +5,7 @@
 #import <HealthKit/HealthKit.h>
 #import <dlfcn.h>
 #import <spawn.h>
+#import <sys/wait.h>
 #import <stdlib.h>
 #import <sys/stat.h>
 
@@ -110,55 +111,90 @@ static NSDictionary *UCSDefaultConfig(void) {
     }];
 }
 
-// 写入新样本：从 now+5min 起，每批 2 分钟间隔（未来时间可避免被 HealthKit 按真实样本去重）
+// 写入新样本：优先使用最近 120 分钟内无真实样本的「空分钟」（往过去写，时间贴近实际且不被去重）；
+// 空分钟不足时回退到 now+5min 起未来时间（兜底，保持可用）
 - (void)writeSamples:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
-    NSMutableArray *samples = [NSMutableArray array];
     NSInteger batch = 500;
     NSInteger n = MAX(1, (steps + batch - 1) / batch);
-    NSTimeInterval base = [[NSDate date] timeIntervalSinceReferenceDate] + 5*60;
-    NSInteger remaining = steps;
-    double distRemaining = dist;
-    NSInteger flightsRemaining = flights;
-    NSInteger perFlights = (flights + n - 1) / n;
-    NSDictionary *meta = @{ @"ucsVirtual": @YES };
+    [self findEmptyMinutes:^(NSArray<NSDate *> *emptyMin) {
+        NSMutableArray *samples = [NSMutableArray array];
+        NSTimeInterval nowT = [[NSDate date] timeIntervalSinceReferenceDate];
+        NSInteger remaining = steps;
+        double distRemaining = dist;
+        NSInteger flightsRemaining = flights;
+        NSInteger perFlights = (flights + n - 1) / n;
+        NSDictionary *meta = @{ @"ucsVirtual": @YES };
 
-    for (NSInteger i = 0; i < n; i++) {
-        NSTimeInterval st = base + i*2*60;
-        NSTimeInterval en = st + 60;
-        NSDate *sd = [NSDate dateWithTimeIntervalSinceReferenceDate:st];
-        NSDate *ed = [NSDate dateWithTimeIntervalSinceReferenceDate:en];
+        for (NSInteger i = 0; i < n; i++) {
+            NSTimeInterval st;
+            if (i < (NSInteger)emptyMin.count) {
+                st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 空分钟（最近优先）
+            } else {
+                st = nowT + (i + 1) * 5 * 60;                        // 兜底：未来时间
+            }
+            NSTimeInterval en = st + 60;
+            NSDate *sd = [NSDate dateWithTimeIntervalSinceReferenceDate:st];
+            NSDate *ed = [NSDate dateWithTimeIntervalSinceReferenceDate:en];
 
-        NSInteger s = MIN(batch, remaining); remaining -= s;
-        double d = 0;
-        if (distRemaining > 0.001) { d = MIN(dist / n, distRemaining); distRemaining -= d; }
-        NSInteger f = MIN(perFlights, flightsRemaining); flightsRemaining -= f;
+            NSInteger s = MIN(batch, remaining); remaining -= s;
+            double d = 0;
+            if (distRemaining > 0.001) { d = MIN(dist / n, distRemaining); distRemaining -= d; }
+            NSInteger f = MIN(perFlights, flightsRemaining); flightsRemaining -= f;
 
-        if (s > 0) {
-            HKQuantitySample *ss = [HKQuantitySample quantitySampleWithType:[self stepType]
-                quantity:[HKQuantity quantityWithUnit:[HKUnit countUnit] doubleValue:s]
-                startDate:sd endDate:ed metadata:meta];
-            [samples addObject:ss];
+            if (s > 0) {
+                HKQuantitySample *ss = [HKQuantitySample quantitySampleWithType:[self stepType]
+                    quantity:[HKQuantity quantityWithUnit:[HKUnit countUnit] doubleValue:s]
+                    startDate:sd endDate:ed metadata:meta];
+                [samples addObject:ss];
+            }
+            if (d > 0.001) {
+                HKQuantitySample *ds = [HKQuantitySample quantitySampleWithType:[self distType]
+                    quantity:[HKQuantity quantityWithUnit:[HKUnit meterUnit] doubleValue:d]
+                    startDate:sd endDate:ed metadata:meta];
+                [samples addObject:ds];
+            }
+            if (f > 0) {
+                HKQuantitySample *fs = [HKQuantitySample quantitySampleWithType:[self flightsType]
+                    quantity:[HKQuantity quantityWithUnit:[HKUnit countUnit] doubleValue:f]
+                    startDate:sd endDate:ed metadata:meta];
+                [samples addObject:fs];
+            }
         }
-        if (d > 0.001) {
-            HKQuantitySample *ds = [HKQuantitySample quantitySampleWithType:[self distType]
-                quantity:[HKQuantity quantityWithUnit:[HKUnit meterUnit] doubleValue:d]
-                startDate:sd endDate:ed metadata:meta];
-            [samples addObject:ds];
-        }
-        if (f > 0) {
-            HKQuantitySample *fs = [HKQuantitySample quantitySampleWithType:[self flightsType]
-                quantity:[HKQuantity quantityWithUnit:[HKUnit countUnit] doubleValue:f]
-                startDate:sd endDate:ed metadata:meta];
-            [samples addObject:fs];
-        }
-    }
 
-    if (samples.count == 0) { ULog(@"writeSamples: nothing to write"); cb(NO); return; }
-    [self.store saveObjects:samples withCompletion:^(BOOL success, NSError *error) {
-        if (error) ULog(@"saveObjects error: %@", error);
-        ULog(@"saved %lu samples (steps=%ld dist=%.0fm flights=%ld)", (unsigned long)samples.count, (long)steps, dist, (long)flights);
-        cb(success);
+        if (samples.count == 0) { ULog(@"writeSamples: nothing to write"); cb(NO); return; }
+        [self.store saveObjects:samples withCompletion:^(BOOL success, NSError *error) {
+            if (error) ULog(@"saveObjects error: %@", error);
+            ULog(@"saved %lu samples (steps=%ld dist=%.0fm flights=%ld, emptyMin=%lu)",
+                 (unsigned long)samples.count, (long)steps, dist, (long)flights, (unsigned long)emptyMin.count);
+            cb(success);
+        }];
     }];
+}
+
+// 查询最近 120 分钟内的「空分钟」：没有真实步数样本占用的整分钟，从最近到最旧排序
+- (void)findEmptyMinutes:(void(^)(NSArray<NSDate *> *))cb {
+    NSDate *now = [NSDate date];
+    NSDate *start = [now dateByAddingTimeInterval:-120*60];
+    NSPredicate *pred = [HKQuery predicateForSamplesWithStartDate:start endDate:now options:HKQueryOptionStrictStartDate];
+    HKSampleQuery *q = [[HKSampleQuery alloc] initWithSampleType:[self stepType] predicate:pred limit:HKObjectQueryNoLimit sortDescriptors:nil resultsHandler:^(HKSampleQuery *query, NSArray<HKSample *> *results, NSError *error) {
+        NSMutableSet *occ = [NSMutableSet set];
+        NSDateFormatter *f = [[NSDateFormatter alloc] init];
+        f.dateFormat = @"yyyyMMddHHmm";
+        for (HKSample *s in results) {
+            [occ addObject:[f stringFromDate:s.startDate]];
+            [occ addObject:[f stringFromDate:s.endDate]];
+        }
+        NSMutableArray *empty = [NSMutableArray array];
+        for (NSInteger m = 119; m >= 0; m--) {   // 从最近往回找
+            NSDate *cand = [start dateByAddingTimeInterval:(m + 1) * 60];
+            if (![occ containsObject:[f stringFromDate:cand]]) {
+                [empty addObject:cand];
+            }
+        }
+        ULog(@"findEmptyMinutes: %lu empty of 120", (unsigned long)empty.count);
+        cb(empty);
+    }];
+    [self.store executeQuery:q];
 }
 
 + (NSString *)todayString {
@@ -238,6 +274,10 @@ static NSDictionary *UCSDefaultConfig(void) {
     self.tableView.tableFooterView = self.statusLabel;
 
     [self loadSettings];
+
+    // App 在 mobile 用户上下文运行，自行加载/兜底 LaunchAgent
+    // （postinst 以 root 运行 bootstrap 可能失败 exit=45，App 内加载才是 roothide 验证过的方式）
+    [self ensureLaunchAgentLoaded];
     [self updateStatus:@"点击「生成运动数据」后，步数将写入健康，微信运动自动同步。"];
 
     // 首次请求 HealthKit 授权（仅首次弹窗）
@@ -277,6 +317,29 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 - (void)updateStatus:(NSString *)msg {
     self.statusLabel.text = msg;
+}
+
+// App 在 mobile 用户上下文运行，自行加载/兜底 LaunchAgent
+// （postinst 以 root 运行 bootstrap 可能失败 exit=45，App 内加载才是 roothide 验证过的方式）
+- (void)ensureLaunchAgentLoaded {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        NSString *plist = @"/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:plist]) {
+            ULog(@"ensureLaunchAgent: plist missing: %@", plist);
+            return;
+        }
+        const char *lc = "/var/jb/usr/bin/launchctl";
+        if (access(lc, X_OK) != 0) lc = "/usr/bin/launchctl";
+        pid_t pid;
+        // bootstrap 已在运行则先 bootout（幂等）
+        char *b1[] = { (char *)"launchctl", (char *)"bootout", (char *)"user/foreground/com.sykes.ucs.schedule", NULL };
+        posix_spawn(&pid, lc, NULL, NULL, b1, NULL);
+        usleep(300 * 1000);
+        char *b2[] = { (char *)"launchctl", (char *)"bootstrap", (char *)"user/foreground", (char *)[plist UTF8String], NULL };
+        int rc = posix_spawn(&pid, lc, NULL, NULL, b2, NULL);
+        int st = 0; if (rc == 0) waitpid(pid, &st, 0);
+        ULog(@"ensureLaunchAgent: bootstrap rc=%d status=%d", rc, st);
+    });
 }
 
 - (double)displayKM {
