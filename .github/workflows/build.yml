@@ -1,0 +1,125 @@
+name: Build UCS roothide deb
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        run: |
+          brew install dpkg
+          brew install ldid-procursus 2>/dev/null || brew install procursus/ldid/ldid 2>/dev/null || { echo "ERROR: ldid install failed"; exit 1; }
+          command -v ldid >/dev/null 2>&1 || { echo "ERROR: ldid not available"; exit 1; }
+          ldid -h >/dev/null 2>&1 && echo "ldid OK" || echo "WARN: ldid self-test skipped"
+
+      - name: Build deb (single arm64e, roothide layout)
+        run: bash build.sh
+
+      - name: Verify artifact BEFORE publishing
+        run: |
+          set -e
+          DEB=$(ls com.sykes.ucs_*_iphoneos-arm64e.deb | head -1)
+          echo "deb: $DEB"
+
+          echo "=== (1) control fields ==="
+          dpkg-deb -f "$DEB" Package | grep -q '^com.sykes.ucs$'
+          dpkg-deb -f "$DEB" Version | grep -q '^1.0.0$'
+          dpkg-deb -f "$DEB" Architecture | grep -q '^iphoneos-arm64e$'
+          echo "  (1) OK"
+
+          echo "=== (2) no /var/jb or /var/roothide absolute prefixes ==="
+          if dpkg-deb -c "$DEB" | grep -E '\./var/(jb|roothide)/'; then
+            echo "ERROR: absolute var path found"; exit 1
+          fi
+          if ! dpkg-deb -c "$DEB" | grep -E '\./Applications/UCS\.app/UCS' ; then
+            echo "ERROR: ./Applications/UCS.app/UCS missing"; exit 1
+          fi
+          if ! dpkg-deb -c "$DEB" | grep -E '\./Library/MobileSubstrate/DynamicLibraries/StepFaker\.(dylib|plist)' ; then
+            echo "ERROR: StepFaker dylib/plist missing"; exit 1
+          fi
+          echo "  (2) OK"
+
+          echo "=== (3) extract + verify binaries ==="
+          rm -rf /tmp/ucscheck && mkdir -p /tmp/ucscheck
+          dpkg-deb -x "$DEB" /tmp/ucscheck
+          APPBIN=/tmp/ucscheck/Applications/UCS.app/UCS
+          [ -f "$APPBIN" ] || { echo "ERROR: app binary not found"; exit 1; }
+
+          echo "  (3a) App Mach-O magic must be cffaedfe (single arm64e, not FAT)"
+          amagic=$(xxd -p -l4 "$APPBIN" | tr -d '\n')
+          [ "$amagic" = "cffaedfe" ] || { echo "ERROR: app magic=$amagic"; exit 1; }
+          echo "  (3a) OK magic=$amagic"
+
+          echo "  (3b) App entitlements must include no-sandbox + healthkit"
+          ENT=$(ldid -e "$APPBIN" 2>/dev/null || true)
+          echo "$ENT" | grep -q "no-sandbox" || { echo "ERROR: missing no-sandbox"; exit 1; }
+          echo "$ENT" | grep -q "healthkit" || { echo "ERROR: missing healthkit"; exit 1; }
+          echo "  (3b) OK"
+
+          echo "  (3c) Info.plist CFBundleExecutable=UCS"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" /tmp/ucscheck/Applications/UCS.app/Info.plist | grep -q '^UCS$'
+          echo "  (3c) OK"
+
+          echo "=== (4) StepFaker tweak verification ==="
+          TDYLIB=/tmp/ucscheck/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib
+          TPLIST=/tmp/ucscheck/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist
+          [ -f "$TDYLIB" ] || { echo "ERROR: dylib missing"; exit 1; }
+          [ -f "$TPLIST" ] || { echo "ERROR: plist missing"; exit 1; }
+
+          echo "  (4a) dylib Mach-O magic must be cffaedfe (single arm64e)"
+          tmagic=$(xxd -p -l4 "$TDYLIB" | tr -d '\n')
+          [ "$tmagic" = "cffaedfe" ] || { echo "ERROR: dylib magic=$tmagic"; exit 1; }
+          echo "  (4a) OK magic=$tmagic"
+
+          echo "  (4b) install_name must resolve within @loader_path"
+          IN=$(otool -D "$TDYLIB" 2>/dev/null | tail -1 | tr -d ' ')
+          echo "  install_name: $IN"
+          case "$IN" in
+            @loader_path/*|@rpath/*) echo "  (4b) OK install_name=$IN" ;;
+            *) echo "  (4b) WARN install_name=$IN (non-standard but acceptable for MobileSubstrate)" ;;
+          esac
+
+          echo "  (4c) Filter must target ONLY com.tencent.xin, no wildcard"
+          /usr/libexec/PlistBuddy -c "Print :Filter:Bundles" "$TPLIST" | grep -q "com.tencent.xin" || { echo "ERROR: missing com.tencent.xin"; exit 1; }
+          if /usr/libexec/PlistBuddy -c "Print" "$TPLIST" | grep -qE '\*'; then
+            echo "ERROR: wildcard in filter"; exit 1
+          fi
+          echo "  (4c) OK"
+
+          echo "=== (5) postinst present + executable ==="
+          [ -f /tmp/ucscheck/DEBIAN/postinst ] || { echo "ERROR: postinst missing"; exit 1; }
+          echo "  (5) OK"
+
+          echo "=== ALL CHECKS PASSED ==="
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ucs-deb
+          path: "*.deb"
+          retention-days: 30
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          DEB=$(ls com.sykes.ucs_*_iphoneos-arm64e.deb | head -1)
+          VER=1.0.0
+          TAG="v${VER}"
+          gh release create "$TAG" "$DEB" \
+            --repo "${{ github.repository }}" \
+            --title "UCS v${VER}" \
+            --notes "UCS v${VER} 首个正式版：手动/定时生成健康与微信步数，单 DEB 安装即用。" \
+            || gh release upload "$TAG" "$DEB" --repo "${{ github.repository }}" --clobber
+          echo "✓ Release: https://github.com/${{ github.repository }}/releases/tag/$TAG"

@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.m text eol=lf
+*.plist text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.png binary
