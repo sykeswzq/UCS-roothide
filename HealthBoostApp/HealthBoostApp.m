@@ -89,16 +89,24 @@ static NSDictionary *UCSDefaultConfig(void) {
 }
 
 // 删除旧的虚拟样本：metadata ucsVirtual=YES，窗口覆盖 -48h ~ +48h（未来样本也删得到）
+// BUG 修复：原来只删 stepType，导致楼层/距离每次生成都叠加；现改为串行删除三种类型
 - (void)deleteOldVirtual:(void(^)(BOOL))cb {
     NSDate *start = [[NSDate date] dateByAddingTimeInterval:-48*3600];
     NSDate *end   = [[NSDate date] dateByAddingTimeInterval: 48*3600];
     NSPredicate *timePred = [HKQuery predicateForSamplesWithStartDate:start endDate:end options:HKQueryOptionStrictStartDate];
     NSPredicate *metaPred = [HKQuery predicateForObjectsWithMetadataKey:@"ucsVirtual"];
     NSPredicate *pred = [NSCompoundPredicate andPredicateWithSubpredicates:@[timePred, metaPred]];
-    [self.store deleteObjectsOfType:[self stepType] predicate:pred withCompletion:^(BOOL success, NSUInteger count, NSError *error) {
-        if (error) ULog(@"deleteOldVirtual error: %@", error);
-        ULog(@"deleted %lu old virtual samples", (unsigned long)count);
-        cb(success);
+    NSArray *types = @[[self stepType], [self distType], [self flightsType]];
+    [self deleteTypeInArray:types index:0 predicate:pred cb:cb];
+}
+
+- (void)deleteTypeInArray:(NSArray *)types index:(NSUInteger)i predicate:(NSPredicate *)pred cb:(void(^)(BOOL))cb {
+    if (i >= types.count) { cb(YES); return; }
+    HKQuantityType *type = types[i];
+    [self.store deleteObjectsOfType:type predicate:pred withCompletion:^(BOOL success, NSUInteger count, NSError *error) {
+        if (error) ULog(@"deleteOldVirtual(%@) error: %@", type.identifier, error);
+        ULog(@"deleted %lu old virtual %@ samples", (unsigned long)count, type.identifier);
+        [self deleteTypeInArray:types index:i+1 predicate:pred cb:cb];
     }];
 }
 
