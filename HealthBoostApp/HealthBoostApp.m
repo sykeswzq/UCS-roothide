@@ -95,7 +95,7 @@ static NSDictionary *UCSDefaultConfig(void) {
     NSPredicate *timePred = [HKQuery predicateForSamplesWithStartDate:start endDate:end options:HKQueryOptionStrictStartDate];
     NSPredicate *metaPred = [HKQuery predicateForObjectsWithMetadataKey:@"ucsVirtual"];
     NSPredicate *pred = [NSCompoundPredicate andPredicateWithSubpredicates:@[timePred, metaPred]];
-    [self.store deleteObjectsOfType:[self stepType] predicate:pred withResultsHandler:^(BOOL success, NSUInteger count, NSError *error) {
+    [self.store deleteObjectsOfType:[self stepType] predicate:pred withCompletion:^(BOOL success, NSUInteger count, NSError *error) {
         if (error) ULog(@"deleteOldVirtual error: %@", error);
         ULog(@"deleted %lu old virtual samples", (unsigned long)count);
         cb(success);
@@ -169,10 +169,28 @@ static NSDictionary *UCSDefaultConfig(void) {
 }
 
 // 微信同步：杀微信 -> 等待 -> 重新拉起微信，触发其读取 HealthKit 并上传服务器
+// iOS 上 system() 不可用，改用 posix_spawn（spawn.h 已在文件头引入）
 + (void)syncWeChat {
     ULog(@"syncWeChat: killing WeChat");
-    int rc = system("/var/jb/usr/bin/killall -9 WeChat 2>/dev/null; sleep 2; /var/jb/usr/bin/uiopen com.tencent.xin 2>/dev/null &");
-    ULog(@"syncWeChat done rc=%d", rc);
+    extern char **environ;
+    pid_t pid;
+    // 1) 杀微信
+    char *kill_argv[] = { (char *)"killall", (char *)"-9", (char *)"WeChat", NULL };
+    int rc1 = posix_spawn(&pid, "/var/jb/usr/bin/killall", NULL, NULL, kill_argv, environ);
+    if (rc1 != 0) {
+        // 回退到 /usr/bin/killall（非 roothide 布局）
+        rc1 = posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, kill_argv, environ);
+    }
+    ULog(@"syncWeChat: kill rc=%d", rc1);
+    // 2) 等待 2 秒让微信完全退出
+    usleep(2 * 1000000);
+    // 3) 重新拉起微信，触发服务器同步
+    char *ui_argv[] = { (char *)"uiopen", (char *)"com.tencent.xin", NULL };
+    int rc2 = posix_spawn(&pid, "/var/jb/usr/bin/uiopen", NULL, NULL, ui_argv, environ);
+    if (rc2 != 0) {
+        rc2 = posix_spawn(&pid, "/usr/bin/uiopen", NULL, NULL, ui_argv, environ);
+    }
+    ULog(@"syncWeChat: uiopen rc=%d", rc2);
 }
 
 @end
