@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.0
+VER=1.0.1
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -137,21 +137,34 @@ cat > "$SCRIPT" << 'SCREOF'
 #!/bin/sh
 LOG=/var/mobile/Documents/ucs_launchd.log
 echo "tick $(date) uid=$(id -u)" >> "$LOG"
-CFG=/var/mobile/Documents/ucs_config.plist
+# 配置双路读取：App（mobile 沙盒）实际写入的物理位置是 /rootfs/private/var/mobile/Documents/，
+# postinst 默认写 /var/mobile/Documents/；两个视图 inode 不同，必须都尝试
+CFG=""
+for c in /rootfs/private/var/mobile/Documents/ucs_config.plist /var/mobile/Documents/ucs_config.plist; do
+  if [ -f "$c" ]; then CFG="$c"; break; fi
+done
+[ -n "$CFG" ] || { echo "config missing" >> "$LOG"; exit 0; }
+echo "using cfg=$CFG" >> "$LOG"
 ENABLED=$(/usr/bin/plutil -extract scheduleEnabled raw -o - "$CFG" 2>/dev/null)
+echo "scheduleEnabled=$ENABLED" >> "$LOG"
 [ "$ENABLED" = "true" ] || exit 0
 NT=$(/usr/bin/plutil -extract scheduleTime raw -o - "$CFG" 2>/dev/null)
 [ -n "$NT" ] || exit 0
 NOWH=$(date +%H); NOWM=$(date +%M); N=$((10#$NOWH*60+10#$NOWM))
 SH=$(echo "$NT" | cut -d: -f1); SM=$(echo "$NT" | cut -d: -f2)
 S=$((10#$SH*60+10#$SM))
+echo "now=$N sched=$S" >> "$LOG"
 [ "$N" -lt "$S" ] && exit 0
-# 今天已生成则跳过
+# 今天已生成则跳过（双路读取 lastgen）
 TODAY=$(date +%Y-%m-%d)
-LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
+LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
+[ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
+echo "lastgen=$LAST today=$TODAY" >> "$LOG"
 [ "$LAST" = "$TODAY" ] && exit 0
-# 到点：touch marker + uiopen 拉起 App 自动生成
+# 到点：touch marker（双路：App 沙盒视图 + 真实视图）+ uiopen 拉起 App 自动生成
+touch /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
 touch /var/mobile/Documents/ucs_wake.marker
+chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
 chmod 666 /var/mobile/Documents/ucs_wake.marker
 echo "wake $(date) now=$N sched=$S" >> "$LOG"
 /var/jb/usr/bin/uiopen ucs://generate >> "$LOG" 2>&1 || /usr/bin/uiopen ucs://generate >> "$LOG" 2>&1 || true
@@ -160,7 +173,8 @@ chmod 755 "$SCRIPT"
 chown mobile:mobile "$SCRIPT" 2>/dev/null || true
 echo "script written: $(wc -l < "$SCRIPT") lines" >> "$LOG"
 
-# LaunchAgent：放 /var/mobile/Library/LaunchAgents/（mobile 用户域，勿放 /var/jb/Library/LaunchAgents/）
+# LaunchAgent：双写 /var/mobile/Library/LaunchAgents/（root 视图，launchd 读）
+# 与 /rootfs/private/var/mobile/Library/LaunchAgents/（App 沙盒视图，App 兜底检查）
 mkdir -p /var/mobile/Library/LaunchAgents
 PLIST=/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
 cat > "$PLIST" << 'PLEOF'
@@ -188,13 +202,22 @@ cat > "$PLIST" << 'PLEOF'
 PLEOF
 chmod 644 "$PLIST"
 chown mobile:mobile "$PLIST" 2>/dev/null || true
-plutil -lint "$PLIST" >> "$LOG" 2>&1 || true
+# 同步到 App 沙盒视图（postinst 以 root 运行可写）
+mkdir -p /rootfs/private/var/mobile/Library/LaunchAgents 2>/dev/null || true
+cp "$PLIST" /rootfs/private/var/mobile/Library/LaunchAgents/ 2>/dev/null || true
+chmod 644 /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
+chown mobile:mobile /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
 
-# 注册（roothide 域：user/foreground；postinst 以 root 运行，需 su mobile）
+# 注册（roothide 域：user/foreground；必须以 mobile uid=501 运行，root 的 uiopen 拉起不了 App）
+# 修复：去掉 su mobile（依赖密码）+ root fallback（uid=0），改用 asuser 501 直接以 mobile 身份 bootstrap
+# 两个视图路径都尝试：mobile 上下文可能只能读到 rootfs 视图（App 沙盒物理落盘位置）
 launchctl bootout user/foreground/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
-su mobile -c "launchctl bootstrap user/foreground '$PLIST'" >> "$LOG" 2>&1 || \
-launchctl bootstrap user/foreground "$PLIST" >> "$LOG" 2>&1 || true
-echo "launchd bootstrap rc=$?" >> "$LOG"
+launchctl asuser 501 launchctl bootout user/foreground/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
+P1=/rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
+P2=/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
+launchctl asuser 501 launchctl bootstrap user/foreground "$P1" >> "$LOG" 2>&1 || \
+launchctl asuser 501 launchctl bootstrap user/foreground "$P2" >> "$LOG" 2>&1 || true
+echo "launchd bootstrap (asuser 501) rc=$?" >> "$LOG"
 
 # 刷新图标缓存
 if [ -x /var/jb/usr/bin/uicache ]; then
