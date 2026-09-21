@@ -79,10 +79,16 @@ jobs:
           [ -f "$TDYLIB" ] || { echo "ERROR: dylib missing"; exit 1; }
           [ -f "$TPLIST" ] || { echo "ERROR: plist missing"; exit 1; }
 
-          echo "  (4a) dylib Mach-O magic must be cffaedfe (single arm64e)"
+          echo "  (4a) dylib Mach-O magic must be cafebabe (FAT arm64+arm64e)"
           tmagic=$(xxd -p -l4 "$TDYLIB" | tr -d '\n')
-          [ "$tmagic" = "cffaedfe" ] || { echo "ERROR: dylib magic=$tmagic"; exit 1; }
-          echo "  (4a) OK magic=$tmagic"
+          [ "$tmagic" = "cafebabe" ] || { echo "ERROR: dylib magic=$tmagic (expected cafebabe FAT; WeChat runs arm64 and needs an arm64 slice)"; exit 1; }
+          echo "  (4a) OK magic=$tmagic (FAT)"
+          echo "  (4a2) FAT must contain BOTH arm64 and arm64e slices"
+          ARCHS=$(lipo -archs "$TDYLIB" 2>/dev/null)
+          echo "  lipo -archs: $ARCHS"
+          echo "$ARCHS" | grep -qw arm64  || { echo "ERROR: missing arm64 slice"; exit 1; }
+          echo "$ARCHS" | grep -qw arm64e || { echo "ERROR: missing arm64e slice"; exit 1; }
+          echo "  (4a2) OK slices=arm64+arm64e"
 
           echo "  (4b) install_name must resolve within @loader_path"
           IN=$(otool -D "$TDYLIB" 2>/dev/null | tail -1 | tr -d ' ')
