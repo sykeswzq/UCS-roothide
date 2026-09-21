@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.10
+VER=1.0.11
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -110,6 +110,12 @@ LOG=/var/mobile/Documents/ucs_install.log
 mkdir -p /var/mobile/Documents
 chmod 777 /var/mobile/Documents
 echo "=== postinst $(date) ===" > "$LOG"
+
+# v1.0.11：StepFaker dylib/plist 权限对齐其他 tweak（root:wheel），确保 MobileSubstrate 加载
+chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null || true
+chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist 2>/dev/null || true
+chmod 755 /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null || true
+chmod 644 /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist 2>/dev/null || true
 
 # 默认配置（XML plist，供 launchd 脚本 plutil 读取；App 首次打开会覆盖）
 CFG=/var/mobile/Documents/ucs_config.plist
