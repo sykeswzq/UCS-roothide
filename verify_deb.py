@@ -5,7 +5,7 @@
 """
 import io, os, sys, tarfile, plistlib, struct, gzip
 
-DEB = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Administrator\Desktop\UCS-roothide\com.sykes.ucs_1.0.8_iphoneos-arm64e.deb"
+DEB = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Administrator\Desktop\UCS-roothide\com.sykes.ucs_1.0.9_iphoneos-arm64e.deb"
 ok = True
 def check(name, cond, detail=""):
     global ok
@@ -48,7 +48,7 @@ control_text = ctl_files[cname].decode("utf-8")
 print("----- control -----")
 print(control_text)
 check("control Package=com.sykes.ucs", "Package: com.sykes.ucs" in control_text)
-check("control Version=1.0.8", "Version: 1.0.8" in control_text)
+check("control Version=1.0.9", "Version: 1.0.9" in control_text)
 check("control Architecture=iphoneos-arm64e", "Architecture: iphoneos-arm64e" in control_text)
 check("control Depends firmware>=15.0", "firmware (>= 15.0)" in control_text)
 check("control has postinst", any("postinst" in k for k in ctl_files))
