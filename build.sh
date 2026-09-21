@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.3
+VER=1.0.4
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -172,7 +172,10 @@ touch /var/mobile/Documents/ucs_wake.marker
 chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
 chmod 666 /var/mobile/Documents/ucs_wake.marker
 echo "wake $(date) now=$N sched=$S" >> "$LOG"
-/var/jb/usr/bin/uiopen ucs://generate >> "$LOG" 2>&1 || /usr/bin/uiopen ucs://generate >> "$LOG" 2>&1 || true
+# v1.0.4：job 以 root(uid=0) 跑（roothide 下 user/foreground 也以 root 加载），root 的 uiopen 返回
+# rc=0 但拉不起 App（实测 11:04 触发后 App 无日志）。必须 su mobile -c 以 mobile 身份执行 uiopen，
+# 实测 11:12 完整闭环：wake → App 拉起 → 自动生成 1000 步 → 同步微信。
+/usr/bin/su mobile -c "/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || /usr/bin/su mobile -c "/var/jb/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || true
 SCREOF
 chmod 755 "$SCRIPT"
 chown mobile:mobile "$SCRIPT" 2>/dev/null || true
