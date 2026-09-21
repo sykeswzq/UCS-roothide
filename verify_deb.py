@@ -5,7 +5,7 @@
 """
 import io, os, sys, tarfile, plistlib, struct, gzip
 
-DEB = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Administrator\Desktop\UCS-roothide\com.sykes.ucs_1.0.11_iphoneos-arm64e.deb"
+DEB = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Administrator\Desktop\UCS-roothide\com.sykes.ucs_1.0.12_iphoneos-arm64e.deb"
 ok = True
 def check(name, cond, detail=""):
     global ok
@@ -48,7 +48,7 @@ control_text = ctl_files[cname].decode("utf-8")
 print("----- control -----")
 print(control_text)
 check("control Package=com.sykes.ucs", "Package: com.sykes.ucs" in control_text)
-check("control Version=1.0.11", "Version: 1.0.11" in control_text)
+check("control Version=1.0.12", "Version: 1.0.12" in control_text)
 check("control Architecture=iphoneos-arm64e", "Architecture: iphoneos-arm64e" in control_text)
 check("control Depends firmware>=15.0", "firmware (>= 15.0)" in control_text)
 check("control has postinst", any("postinst" in k for k in ctl_files))
@@ -85,26 +85,59 @@ dylib = data_files[dylib_path]
 # ---- 4. Mach-O magic ----
 def macho_magic(b):
     if len(b) < 4: return "TOO_SHORT"
-    # 文件头字节序：小端 MH_MAGIC_64 = cf fa ed fe（单 arm64e）；cafe babe = FAT
-    if b[:4] == b"\xcf\xfa\xed\xfe": return "cffaedfe (single arm64e)"
+    # 文件头字节序：小端 MH_MAGIC_64 = cf fa ed fe（单 slice）；cafe babe = FAT
+    if b[:4] == b"\xcf\xfa\xed\xfe": return "cffaedfe (single)"
     if b[:4] == b"\xfe\xed\xfa\xcf": return "feedfacf (MH_MAGIC_64 BE)"
     if b[:4] == b"\xca\xfe\xba\xbe" or b[:4] == b"\xbe\xba\xfe\xca": return "cafebabe (FAT)"
     return "unknown " + b[:4].hex()
 
 am = macho_magic(app)
 dm = macho_magic(dylib)
-check(f"App Mach-O magic={am}", am == "cffaedfe (single arm64e)", "(must be single arm64e cffaedfe, NOT FAT)")
-check(f"dylib Mach-O magic={dm}", dm == "cffaedfe (single arm64e)")
+check(f"App Mach-O magic={am}", am == "cffaedfe (single)", "(App must be single arm64e cffaedfe, NOT FAT)")
+# v1.0.12：StepFaker 必须是 FAT（含 arm64 slice 才能注入 arm64 的微信）
+check(f"dylib Mach-O magic={dm}", dm == "cafebabe (FAT)", "(StepFaker must be FAT arm64+arm64e to inject WeChat)")
 
-# ---- 5. arm64e 子类型检查 (cputype=0x0100000c arm64, cpusubtype=2 arm64e, 高位 capability 位需掩码) ----
-def is_arm64e(b):
-    if len(b) < 20: return False
+# ---- 5. cpu 子类型检查 ----
+ARM64  = 0x0100000C
+def slice_subtype(b):
+    """对单 slice 小端 mach_header，返回 (cputype, cpusubtype&0xffffff)。"""
+    if len(b) < 12: return None, None
     cputype, cpusubtype = struct.unpack("<II", b[4:12])
-    return cputype == 0x0100000C and (cpusubtype & 0x00FFFFFF) == 2
-check("App is arm64e", is_arm64e(app))
-check("dylib is arm64e", is_arm64e(dylib))
+    return cputype, cpusubtype & 0x00FFFFFF
 
-# ---- 6. dylib install_name (LC_ID_DYLIB, cmd=0xD) ----
+def parse_fat(b):
+    """解析大端 FAT，返回 [(cputype, subtype&mask, offset, size)]。32 位 fat_arch，每项 20 字节。"""
+    if b[:4] != b"\xca\xfe\xba\xbe": return []
+    nfat, = struct.unpack(">I", b[4:8])
+    out = []
+    off = 8
+    for _ in range(nfat):
+        if off + 20 > len(b): break
+        cputype, cpusubtype, offset, size, align = struct.unpack(">IIIII", b[off:off+20])
+        out.append((cputype, cpusubtype & 0x00FFFFFF, offset, size))
+        off += 20
+    return out
+
+# App：单 arm64e
+act, cst = slice_subtype(app)
+check("App is arm64e", act == ARM64 and cst == 2)
+
+# dylib：FAT 内必须同时含 arm64(subtype=0) 与 arm64e(subtype=2)
+fat_slices = parse_fat(dylib)
+fat_desc = ", ".join(f"arm64(sub={s})" if ct == ARM64 else hex(ct) for ct, s, _, _ in fat_slices)
+check(f"dylib FAT slices=[{fat_desc}]", len(fat_slices) >= 2, f"(need arm64+arm64e, got {len(fat_slices)})")
+subs = {s for ct, s, _, _ in fat_slices if ct == ARM64}
+check("dylib FAT contains arm64 slice", 0 in subs, "(WeChat runs arm64; arm64 slice required)")
+check("dylib FAT contains arm64e slice", 2 in subs, "(arm64e fallback slice required)")
+# 取 arm64 slice 字节供后续 install_name 校验
+arm64_slice = None
+for ct, s, offset, size in fat_slices:
+    if ct == ARM64 and s == 0:
+        arm64_slice = dylib[offset:offset+size]
+        break
+check("arm64 slice bytes readable", arm64_slice is not None and arm64_slice[:4] == b"\xcf\xfa\xed\xfe")
+
+# ---- 6. dylib install_name (LC_ID_DYLIB, cmd=0xD)，从 arm64 slice 读 ----
 def read_install_name(b):
     if len(b) < 32: return None
     ncmds, = struct.unpack("<I", b[16:20])
@@ -119,7 +152,7 @@ def read_install_name(b):
         off += cmdsize
     return None
 
-iname = read_install_name(dylib)
+iname = read_install_name(arm64_slice if arm64_slice else dylib)
 check(f"dylib install_name={iname}", bool(iname), "(verified present)")
 
 # ---- 7. StepFaker.plist filter ----
