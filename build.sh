@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.2
+VER=1.0.3
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -153,9 +153,11 @@ echo "scheduleEnabled=$ENABLED" >> "$LOG"
 [ "$ENABLED" = "true" ] || exit 0
 NT=$(echo "$FLAT" | sed -n 's:.*<key>scheduleTime</key>[[:space:]]*<string>\([^<]*\)</string>.*:\1:p' | head -1)
 [ -n "$NT" ] || exit 0
-NOWH=$(date +%H); NOWM=$(date +%M); N=$((10#$NOWH*60+10#$NOWM))
-SH=$(echo "$NT" | cut -d: -f1); SM=$(echo "$NT" | cut -d: -f2)
-S=$((10#$SH*60+10#$SM))
+# v1.0.3：设备 /bin/sh 是 dash（实测 /bin/sh -> .jbroot/usr/bin/dash），不支持 10# base 算术语法（报
+# "expecting EOF"）。改用 date +%-H/+%-M 去前导零 + sed 去零 + 纯十进制算术，dash 兼容。
+NOWH=$(date +%-H); NOWM=$(date +%-M); N=$((NOWH*60+NOWM))
+SH=$(echo "$NT" | cut -d: -f1 | sed 's/^0//'); SM=$(echo "$NT" | cut -d: -f2 | sed 's/^0//')
+S=$((SH*60+SM))
 echo "now=$N sched=$S" >> "$LOG"
 [ "$N" -lt "$S" ] && exit 0
 # 今天已生成则跳过（双路读取 lastgen）
