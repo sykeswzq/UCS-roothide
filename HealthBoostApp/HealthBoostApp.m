@@ -395,68 +395,36 @@ static NSDictionary *UCSDefaultConfig(void) {
 //         改为 posix_spawn 直调 launchctl（与 syncWeChat 同款已验证路径），stdout/stderr 重定向到
 //         日志文件再读回；先 launchctl print 检查 job 是否已加载——已加载直接跳过（绝不 bootout），
 //         未加载才 bootstrap。
+// v1.0.5：App 沙盒内 launchctl print 视角与 root 不一致（实测 print 报 Could not find service，
+//         bootstrap 必报 Operation not permitted），且 job 由 postinst root 直连 bootstrap 挂载
+//         （已验证可行）。App 内只做 print 检查写日志，绝不 bootstrap/bootout，打开零副作用。
 - (void)ensureLaunchAgentLoaded {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-        NSString *plist = @"/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist";
-        if (![[NSFileManager defaultManager] fileExistsAtPath:plist]) {
-            // App 沙盒视图：尝试 rootfs 物理视图
-            NSString *alt = @"/rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist";
-            if ([[NSFileManager defaultManager] fileExistsAtPath:alt]) {
-                plist = alt;
-            } else {
-                ULog(@"ensureLaunchAgent: plist missing: %@ (alt %@)", plist, alt);
-                return;
-            }
-        }
         NSString *lcStr = JBPath(@"/var/jb/usr/bin/launchctl");
         const char *lc = lcStr.UTF8String;
         if (access(lc, X_OK) != 0) lc = "/usr/bin/launchctl";
         extern char **environ;
         NSString *outFile = @"/var/mobile/Documents/ucs_launchctl_out.log";
-        // 1) 先检查 job 是否已加载：launchctl print（stdout+stderr 都进日志文件，读回写 ULog）
-        {
-            char *args[] = { (char *)"launchctl", (char *)"print", (char *)"user/foreground/com.sykes.ucs.schedule", NULL };
-            pid_t pid;
-            posix_spawn_file_actions_t fa;
-            posix_spawn_file_actions_init(&fa);
-            int fd = open(outFile.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd >= 0) {
-                posix_spawn_file_actions_adddup2(&fa, fd, STDOUT_FILENO);
-                posix_spawn_file_actions_adddup2(&fa, fd, STDERR_FILENO);
-                posix_spawn_file_actions_addclose(&fa, fd);
-            }
-            int rc = posix_spawn(&pid, lc, &fa, NULL, args, environ);
-            if (fd >= 0) close(fd);
-            int status = 0;
-            if (rc == 0) waitpid(pid, &status, 0);
-            NSString *out = [NSString stringWithContentsOfFile:outFile encoding:NSUTF8StringEncoding error:nil];
-            ULog(@"ensureLaunchAgent: print rc=%d exit=%d out=%@", rc,
-                 (rc == 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1, out ?: @"(empty)");
-            if (rc == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                ULog(@"ensureLaunchAgent: job already loaded, skip");
-                return;
-            }
+        // 只读检查：launchctl print（stdout+stderr 都进日志文件，读回写 ULog）
+        char *args[] = { (char *)"launchctl", (char *)"print", (char *)"user/foreground/com.sykes.ucs.schedule", NULL };
+        pid_t pid;
+        posix_spawn_file_actions_t fa;
+        posix_spawn_file_actions_init(&fa);
+        int fd = open(outFile.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            posix_spawn_file_actions_adddup2(&fa, fd, STDOUT_FILENO);
+            posix_spawn_file_actions_adddup2(&fa, fd, STDERR_FILENO);
+            posix_spawn_file_actions_addclose(&fa, fd);
         }
-        // 2) job 未加载才 bootstrap（不再 bootout 已有 job）
-        {
-            char *args[] = { (char *)"launchctl", (char *)"bootstrap", (char *)"user/foreground", (char *)plist.UTF8String, NULL };
-            pid_t pid;
-            posix_spawn_file_actions_t fa;
-            posix_spawn_file_actions_init(&fa);
-            int fd = open(outFile.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd >= 0) {
-                posix_spawn_file_actions_adddup2(&fa, fd, STDOUT_FILENO);
-                posix_spawn_file_actions_adddup2(&fa, fd, STDERR_FILENO);
-                posix_spawn_file_actions_addclose(&fa, fd);
-            }
-            int rc = posix_spawn(&pid, lc, &fa, NULL, args, environ);
-            if (fd >= 0) close(fd);
-            int status = 0;
-            if (rc == 0) waitpid(pid, &status, 0);
-            NSString *out = [NSString stringWithContentsOfFile:outFile encoding:NSUTF8StringEncoding error:nil];
-            ULog(@"ensureLaunchAgent: bootstrap rc=%d exit=%d out=%@", rc,
-                 (rc == 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1, out ?: @"(empty)");
-        }
+        int rc = posix_spawn(&pid, lc, &fa, NULL, args, environ);
+        if (fd >= 0) close(fd);
+        int status = 0;
+        if (rc == 0) waitpid(pid, &status, 0);
+        NSString *out = [NSString stringWithContentsOfFile:outFile encoding:NSUTF8StringEncoding error:nil];
+        ULog(@"ensureLaunchAgent: print rc=%d exit=%d out=%@", rc,
+             (rc == 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1, out ?: @"(empty)");
+        posix_spawn_file_actions_destroy(&fa);
+        // 无论是否已加载，App 内都不做任何修改（bootstrap 在沙盒内必失败，且 job 由 postinst 负责）
     });
 }
 
