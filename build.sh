@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.1
+VER=1.0.2
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -145,10 +145,13 @@ for c in /rootfs/private/var/mobile/Documents/ucs_config.plist /var/mobile/Docum
 done
 [ -n "$CFG" ] || { echo "config missing" >> "$LOG"; exit 0; }
 echo "using cfg=$CFG" >> "$LOG"
-ENABLED=$(/usr/bin/plutil -extract scheduleEnabled raw -o - "$CFG" 2>/dev/null)
+# v1.0.2：iOS /usr/bin/plutil 不支持 -extract（实测 rc=255 / 报错），脚本里读配置恒为空导致到点不触发。
+# 改为 sed 直接解析 XML plist（兼容 App 落盘的换行缩进格式，先压成单行再提取）。
+FLAT=$(tr -d '\n' < "$CFG")
+ENABLED=$(echo "$FLAT" | sed -n 's:.*<key>scheduleEnabled</key>[[:space:]]*<\(true\|false\)/>.*:\1:p' | head -1)
 echo "scheduleEnabled=$ENABLED" >> "$LOG"
 [ "$ENABLED" = "true" ] || exit 0
-NT=$(/usr/bin/plutil -extract scheduleTime raw -o - "$CFG" 2>/dev/null)
+NT=$(echo "$FLAT" | sed -n 's:.*<key>scheduleTime</key>[[:space:]]*<string>\([^<]*\)</string>.*:\1:p' | head -1)
 [ -n "$NT" ] || exit 0
 NOWH=$(date +%H); NOWM=$(date +%M); N=$((10#$NOWH*60+10#$NOWM))
 SH=$(echo "$NT" | cut -d: -f1); SM=$(echo "$NT" | cut -d: -f2)
