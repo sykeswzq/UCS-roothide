@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.4
+VER=1.0.5
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -131,51 +131,59 @@ CFGEOF
 fi
 echo "config ready" >> "$LOG"
 
-# 定时轮询脚本（mobile 用户共享目录，uid 必须是 501）
+# 定时脚本（mobile 用户共享目录，launchd KeepAlive 常驻）
 SCRIPT=/var/mobile/Documents/ucs_schedule.sh
 cat > "$SCRIPT" << 'SCREOF'
 #!/bin/sh
+# v1.0.5：常驻循环。v1.0.3 用 StartInterval=60 轮询，但 iOS launchd 的 ThrottleInterval
+# （minimum runtime=10）会惩罚运行过短（<10s）的 job：脚本未到点秒退 → 退避调度 →
+# 实测 bootstrap 后 runs=1 就再也不 tick。改为 launchd KeepAlive 拉起本脚本常驻，
+# 脚本内部每 30s 自查，到点才动作，彻底绕开退避。
 LOG=/var/mobile/Documents/ucs_launchd.log
-echo "tick $(date) uid=$(id -u)" >> "$LOG"
-# 配置双路读取：App（mobile 沙盒）实际写入的物理位置是 /rootfs/private/var/mobile/Documents/，
-# postinst 默认写 /var/mobile/Documents/；两个视图 inode 不同，必须都尝试
-CFG=""
-for c in /rootfs/private/var/mobile/Documents/ucs_config.plist /var/mobile/Documents/ucs_config.plist; do
-  if [ -f "$c" ]; then CFG="$c"; break; fi
+echo "=== ucs_schedule daemon started pid=$$ uid=$(id -u) $(date) ===" >> "$LOG"
+while true; do
+  # 配置双路读取：App（mobile 沙盒）实际写入的物理位置是 /rootfs/private/var/mobile/Documents/，
+  # postinst 默认写 /var/mobile/Documents/；两个视图 inode 不同，必须都尝试
+  CFG=""
+  for c in /rootfs/private/var/mobile/Documents/ucs_config.plist /var/mobile/Documents/ucs_config.plist; do
+    if [ -f "$c" ]; then CFG="$c"; break; fi
+  done
+  if [ -z "$CFG" ]; then
+    echo "config missing $(date)" >> "$LOG"
+    sleep 30; continue
+  fi
+  # v1.0.2：iOS /usr/bin/plutil 不支持 -extract（实测 rc=255 / 报错），脚本里读配置恒为空导致到点不触发。
+  # 改为 sed 直接解析 XML plist（兼容 App 落盘的换行缩进格式，先压成单行再提取）。
+  FLAT=$(tr -d '\n' < "$CFG")
+  ENABLED=$(echo "$FLAT" | sed -n 's:.*<key>scheduleEnabled</key>[[:space:]]*<\(true\|false\)/>.*:\1:p' | head -1)
+  if [ "$ENABLED" != "true" ]; then sleep 30; continue; fi
+  NT=$(echo "$FLAT" | sed -n 's:.*<key>scheduleTime</key>[[:space:]]*<string>\([^<]*\)</string>.*:\1:p' | head -1)
+  [ -n "$NT" ] || { sleep 30; continue; }
+  # v1.0.3：设备 /bin/sh 是 dash（实测 /bin/sh -> .jbroot/usr/bin/dash），不支持 10# base 算术语法（报
+  # "expecting EOF"）。改用 date +%-H/+%-M 去前导零 + sed 去零 + 纯十进制算术，dash 兼容。
+  NOWH=$(date +%-H); NOWM=$(date +%-M); N=$((NOWH*60+NOWM))
+  SH=$(echo "$NT" | cut -d: -f1 | sed 's/^0//'); SM=$(echo "$NT" | cut -d: -f2 | sed 's/^0//')
+  S=$((SH*60+SM))
+  # 未到点则等待
+  if [ "$N" -lt "$S" ]; then sleep 30; continue; fi
+  # 今天已生成则跳过（双路读取 lastgen，跨天自动重置）
+  TODAY=$(date +%Y-%m-%d)
+  LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
+  [ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
+  if [ "$LAST" = "$TODAY" ]; then sleep 30; continue; fi
+  # 到点：touch marker（双路：App 沙盒视图 + 真实视图）+ su mobile uiopen 拉起 App 自动生成
+  touch /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
+  touch /var/mobile/Documents/ucs_wake.marker
+  chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
+  chmod 666 /var/mobile/Documents/ucs_wake.marker
+  echo "wake $(date) now=$N sched=$S last=$LAST" >> "$LOG"
+  # v1.0.4：job 以 root(uid=0) 跑（roothide 下 user/foreground 也以 root 加载），root 的 uiopen 返回
+  # rc=0 但拉不起 App（实测 11:04 触发后 App 无日志）。必须 su mobile -c 以 mobile 身份执行 uiopen，
+  # 实测 11:12 完整闭环：wake → App 拉起 → 自动生成 1000 步 → 同步微信。
+  /usr/bin/su mobile -c "/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || /usr/bin/su mobile -c "/var/jb/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || true
+  # 触发后等待 60s 让 App 完成生成并写 lastgen；若生成失败下轮会重试
+  sleep 60
 done
-[ -n "$CFG" ] || { echo "config missing" >> "$LOG"; exit 0; }
-echo "using cfg=$CFG" >> "$LOG"
-# v1.0.2：iOS /usr/bin/plutil 不支持 -extract（实测 rc=255 / 报错），脚本里读配置恒为空导致到点不触发。
-# 改为 sed 直接解析 XML plist（兼容 App 落盘的换行缩进格式，先压成单行再提取）。
-FLAT=$(tr -d '\n' < "$CFG")
-ENABLED=$(echo "$FLAT" | sed -n 's:.*<key>scheduleEnabled</key>[[:space:]]*<\(true\|false\)/>.*:\1:p' | head -1)
-echo "scheduleEnabled=$ENABLED" >> "$LOG"
-[ "$ENABLED" = "true" ] || exit 0
-NT=$(echo "$FLAT" | sed -n 's:.*<key>scheduleTime</key>[[:space:]]*<string>\([^<]*\)</string>.*:\1:p' | head -1)
-[ -n "$NT" ] || exit 0
-# v1.0.3：设备 /bin/sh 是 dash（实测 /bin/sh -> .jbroot/usr/bin/dash），不支持 10# base 算术语法（报
-# "expecting EOF"）。改用 date +%-H/+%-M 去前导零 + sed 去零 + 纯十进制算术，dash 兼容。
-NOWH=$(date +%-H); NOWM=$(date +%-M); N=$((NOWH*60+NOWM))
-SH=$(echo "$NT" | cut -d: -f1 | sed 's/^0//'); SM=$(echo "$NT" | cut -d: -f2 | sed 's/^0//')
-S=$((SH*60+SM))
-echo "now=$N sched=$S" >> "$LOG"
-[ "$N" -lt "$S" ] && exit 0
-# 今天已生成则跳过（双路读取 lastgen）
-TODAY=$(date +%Y-%m-%d)
-LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
-[ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
-echo "lastgen=$LAST today=$TODAY" >> "$LOG"
-[ "$LAST" = "$TODAY" ] && exit 0
-# 到点：touch marker（双路：App 沙盒视图 + 真实视图）+ uiopen 拉起 App 自动生成
-touch /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
-touch /var/mobile/Documents/ucs_wake.marker
-chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
-chmod 666 /var/mobile/Documents/ucs_wake.marker
-echo "wake $(date) now=$N sched=$S" >> "$LOG"
-# v1.0.4：job 以 root(uid=0) 跑（roothide 下 user/foreground 也以 root 加载），root 的 uiopen 返回
-# rc=0 但拉不起 App（实测 11:04 触发后 App 无日志）。必须 su mobile -c 以 mobile 身份执行 uiopen，
-# 实测 11:12 完整闭环：wake → App 拉起 → 自动生成 1000 步 → 同步微信。
-/usr/bin/su mobile -c "/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || /usr/bin/su mobile -c "/var/jb/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || true
 SCREOF
 chmod 755 "$SCRIPT"
 chown mobile:mobile "$SCRIPT" 2>/dev/null || true
@@ -197,8 +205,8 @@ cat > "$PLIST" << 'PLEOF'
 		<string>/bin/sh</string>
 		<string>/var/mobile/Documents/ucs_schedule.sh</string>
 	</array>
-	<key>StartInterval</key>
-	<integer>60</integer>
+	<key>KeepAlive</key>
+	<true/>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
@@ -216,16 +224,11 @@ cp "$PLIST" /rootfs/private/var/mobile/Library/LaunchAgents/ 2>/dev/null || true
 chmod 644 /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
 chown mobile:mobile /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
 
-# 注册（roothide 域：user/foreground；必须以 mobile uid=501 运行，root 的 uiopen 拉起不了 App）
-# 修复：去掉 su mobile（依赖密码）+ root fallback（uid=0），改用 asuser 501 直接以 mobile 身份 bootstrap
-# 两个视图路径都尝试：mobile 上下文可能只能读到 rootfs 视图（App 沙盒物理落盘位置）
+# 注册（roothide 域：user/foreground）。v1.0.4 前用 asuser 501 bootstrap 实测挂不实
+# （rc=0 但 launchctl print 找不到实例）；root 直连 bootstrap 实测可行（state=running）。
 launchctl bootout user/foreground/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
-launchctl asuser 501 launchctl bootout user/foreground/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
-P1=/rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
-P2=/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
-launchctl asuser 501 launchctl bootstrap user/foreground "$P1" >> "$LOG" 2>&1 || \
-launchctl asuser 501 launchctl bootstrap user/foreground "$P2" >> "$LOG" 2>&1 || true
-echo "launchd bootstrap (asuser 501) rc=$?" >> "$LOG"
+launchctl bootstrap user/foreground /var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist >> "$LOG" 2>&1 || true
+echo "launchd bootstrap (root direct) rc=$?" >> "$LOG"
 
 # 刷新图标缓存
 if [ -x /var/jb/usr/bin/uicache ]; then
