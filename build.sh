@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.11
+VER=1.0.12
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -62,15 +62,17 @@ if [ "$magic" != "cffaedfe" ]; then
 fi
 echo "  app signed OK (magic=$magic)"
 
-echo "[3/5] Compile StepFaker tweak (arm64e only)"
+echo "[3/5] Compile StepFaker tweak (fat arm64 + arm64e)"
+# v1.0.12：微信主进程是 arm64（实测 WeChatTweak 纯 arm64 能注入、纯 arm64e 不注入）。
+# 必须含 arm64 slice 才能被微信 dyld 加载；arm64e slice 兜底。对齐原版 v4.4.25。
 xcrun --sdk iphoneos clang \
   -dynamiclib -fobjc-arc \
   -framework Foundation \
   -framework CoreFoundation \
   -framework CoreMotion \
   -framework HealthKit \
-  -arch arm64e \
-  -mios-version-min=15.0 \
+  -arch arm64 -arch arm64e \
+  -mios-version-min=13.0 \
   -isysroot "$SDK" \
   -o tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib \
   tweak/StepFaker.m
@@ -81,11 +83,16 @@ chmod 644 tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist
 
 ldid -M -S tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib
 smagic=$(xxd -p -l4 tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null | tr -d '\n')
-if [ "$smagic" != "cffaedfe" ]; then
-  echo "ERROR: StepFaker Mach-O magic=$smagic (expected cffaedfe single arm64e)"
+# cafebabe=FAT(arm64+arm64e，预期)；cffaedfe=单 arm64e（不满足微信 arm64 注入，这里仅放行但下面校验 fat）
+if [ "$smagic" != "cafebabe" ] && [ "$smagic" != "cffaedfe" ]; then
+  echo "ERROR: StepFaker Mach-O magic=$smagic (expected cafebabe FAT)"
   exit 1
 fi
-echo "  tweak signed OK (magic=$smagic, $(wc -c < tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib) bytes)"
+if [ "$smagic" != "cafebabe" ]; then
+  echo "ERROR: StepFaker is single-slice $smagic, must be FAT arm64+arm64e to inject WeChat(arm64)"
+  exit 1
+fi
+echo "  tweak signed OK (magic=$smagic FAT arm64+arm64e, $(wc -c < tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib) bytes)"
 
 echo "[4/5] Merge tweak + control + postinst"
 cp -R tweak_staging/Library staging/
