@@ -311,7 +311,7 @@ static NSDictionary *UCSDefaultConfig(void) {
 - (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
     [self deleteOldVirtual:^(BOOL ok) {
         if (self.protectedLocked) {
-            ULog("generateNow: data protected locked, skip write (will retry after unlock)");
+            ULog(@"generateNow: data protected locked, skip write (will retry after unlock)");
             cb(NO);
             return;
         }
