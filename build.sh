@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.8
+VER=1.0.9
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -177,10 +177,11 @@ while true; do
   chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
   chmod 666 /var/mobile/Documents/ucs_wake.marker
   echo "wake $(date) now=$N sched=$S last=$LAST" >> "$LOG"
-  # v1.0.7：不再 uiopen（锁屏时 SpringBoard 不响应会挂住），直接以 mobile 身份跑 UCS --cli。
-  # 二进制在 /var/jb/Applications/UCS.app/UCS（rootless layout，/var/jb 是 /var/roothide 的符号链接）。
-  # CLI 模式内部完成删旧->写新->同步微信->写 lastgen，不启动 UI，锁屏也能跑。
-  /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 || /usr/bin/su mobile -c "/var/roothide/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 || true
+  # v1.0.9：回到 uiopen 方案（CLI 直跑拿不到 SpringBoard 数据保护上下文，Code 6）。
+  # 锁屏时 SpringBoard 不响应 uiopen，命令会阻塞——用 timeout 10s 强制返回，脚本继续循环。
+  # 用户解锁后下一轮 wake（30s 内）uiopen 成功拉起 App，App 检测 marker 自动生成。
+  # 不需要用户手动打开 App，解锁后几秒自动完成。
+  /usr/bin/timeout 10 /usr/bin/su mobile -c "/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 || true
   # 触发后等待 60s 让 App 完成生成并写 lastgen；若生成失败下轮会重试
   sleep 60
 done
