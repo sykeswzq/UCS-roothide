@@ -8,6 +8,8 @@
 #import <sys/wait.h>
 #import <stdlib.h>
 #import <sys/stat.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 // ================= 共享路径（/var/mobile/Documents 为 mobile 用户共享目录，launchd 脚本与 App 均可见） =================
 // 注意（v1.0.1 修复）：App 沙盒视图下 /var/mobile/Documents 物理落盘到 /rootfs/private/var/mobile/Documents/，
@@ -388,6 +390,11 @@ static NSDictionary *UCSDefaultConfig(void) {
 // App 在 mobile 用户上下文运行，自行加载/兜底 LaunchAgent
 // （postinst 以 root 运行 bootstrap 可能失败 exit=45，App 内加载才是 roothide 验证过的方式）
 // v1.0.1：plist 双视图检查 + launchctl 路径 jbroot 解析
+// v1.0.4：不再用 popen（App 沙盒里 /bin/sh 相对链接解析失败 → pclose=32512/exit 127、输出为空，
+//         且会先 bootout 删掉可用 job 再 bootstrap，导致用户一打开 App 定时 job 就消失）。
+//         改为 posix_spawn 直调 launchctl（与 syncWeChat 同款已验证路径），stdout/stderr 重定向到
+//         日志文件再读回；先 launchctl print 检查 job 是否已加载——已加载直接跳过（绝不 bootout），
+//         未加载才 bootstrap。
 - (void)ensureLaunchAgentLoaded {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
         NSString *plist = @"/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist";
@@ -404,27 +411,51 @@ static NSDictionary *UCSDefaultConfig(void) {
         NSString *lcStr = JBPath(@"/var/jb/usr/bin/launchctl");
         const char *lc = lcStr.UTF8String;
         if (access(lc, X_OK) != 0) lc = "/usr/bin/launchctl";
-        // v1.0.2：posix_spawn 拿不到 launchctl 的 stderr（v1.0.1 的 bootstrap status=256 原因未知），
-        // 改用 popen 捕获完整输出（bootout 的 stderr 也一起），把真实报错写进日志定位根因
-        NSString *cmd = [NSString stringWithFormat:
-            @"%s bootout user/foreground/com.sykes.ucs.schedule 2>&1; "
-            @"echo BOOTOUT_RC=$?; "
-            @"%s bootstrap user/foreground '%@' 2>&1; "
-            @"echo BOOTSTRAP_RC=$?",
-            lc, lc, plist];
-        FILE *fp = popen(cmd.UTF8String, "r");
-        NSMutableString *out = [NSMutableString string];
-        if (fp) {
-            char buf[512];
-            size_t n;
-            while ((n = fread(buf, 1, sizeof(buf)-1, fp)) > 0) {
-                buf[n] = 0;
-                [out appendFormat:@"%s", buf];
+        extern char **environ;
+        NSString *outFile = @"/var/mobile/Documents/ucs_launchctl_out.log";
+        // 1) 先检查 job 是否已加载：launchctl print（stdout+stderr 都进日志文件，读回写 ULog）
+        {
+            char *args[] = { (char *)"launchctl", (char *)"print", (char *)"user/foreground/com.sykes.ucs.schedule", NULL };
+            pid_t pid;
+            posix_spawn_file_actions_t fa;
+            posix_spawn_file_actions_init(&fa);
+            int fd = open(outFile.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                posix_spawn_file_actions_adddup2(&fa, fd, STDOUT_FILENO);
+                posix_spawn_file_actions_adddup2(&fa, fd, STDERR_FILENO);
+                posix_spawn_file_actions_addclose(&fa, fd);
             }
-            int prc = pclose(fp);
-            ULog(@"ensureLaunchAgent: pclose=%d output:\n%@", prc, out);
-        } else {
-            ULog(@"ensureLaunchAgent: popen failed");
+            int rc = posix_spawn(&pid, lc, &fa, NULL, args, environ);
+            if (fd >= 0) close(fd);
+            int status = 0;
+            if (rc == 0) waitpid(pid, &status, 0);
+            NSString *out = [NSString stringWithContentsOfFile:outFile encoding:NSUTF8StringEncoding error:nil];
+            ULog(@"ensureLaunchAgent: print rc=%d exit=%d out=%@", rc,
+                 (rc == 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1, out ?: @"(empty)");
+            if (rc == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                ULog(@"ensureLaunchAgent: job already loaded, skip");
+                return;
+            }
+        }
+        // 2) job 未加载才 bootstrap（不再 bootout 已有 job）
+        {
+            char *args[] = { (char *)"launchctl", (char *)"bootstrap", (char *)"user/foreground", (char *)plist.UTF8String, NULL };
+            pid_t pid;
+            posix_spawn_file_actions_t fa;
+            posix_spawn_file_actions_init(&fa);
+            int fd = open(outFile.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                posix_spawn_file_actions_adddup2(&fa, fd, STDOUT_FILENO);
+                posix_spawn_file_actions_adddup2(&fa, fd, STDERR_FILENO);
+                posix_spawn_file_actions_addclose(&fa, fd);
+            }
+            int rc = posix_spawn(&pid, lc, &fa, NULL, args, environ);
+            if (fd >= 0) close(fd);
+            int status = 0;
+            if (rc == 0) waitpid(pid, &status, 0);
+            NSString *out = [NSString stringWithContentsOfFile:outFile encoding:NSUTF8StringEncoding error:nil];
+            ULog(@"ensureLaunchAgent: bootstrap rc=%d exit=%d out=%@", rc,
+                 (rc == 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1, out ?: @"(empty)");
         }
     });
 }
