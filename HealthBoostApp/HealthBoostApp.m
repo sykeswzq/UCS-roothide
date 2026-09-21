@@ -752,8 +752,22 @@ static NSDictionary *UCSDefaultConfig(void) {
 @end
 
 // ================= main =================
+// v1.0.7：--cli 命令行模式。daemon 不再 uiopen 拉起 UI（锁屏时 SpringBoard 不响应会挂住），
+// 而是直接以 mobile 身份执行 UCS --cli，跑 runAutoIfDue（删旧->写新->同步微信->写 lastgen），
+// 不启动 UIKit、不依赖亮屏，锁屏/划掉 App 也能完成生成。
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--cli") == 0) {
+                NSLog(@"UCS CLI mode start");
+                @autoreleasepool {
+                    id del = [[NSClassFromString(@"UCSAppDelegate") alloc] init];
+                    [del performSelector:@selector(runAutoIfDue)];
+                }
+                NSLog(@"UCS CLI mode exit");
+                return 0;
+            }
+        }
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([UCSAppDelegate class]));
     }
 }
