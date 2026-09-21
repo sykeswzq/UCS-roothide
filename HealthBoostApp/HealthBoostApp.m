@@ -134,10 +134,32 @@ static NSDictionary *UCSDefaultConfig(void) {
 //      旧版只认 ucsVirtual 导致原项目老样本永远删不掉，微信跨天窗口把它们算进今天）
 //   2) 窗口从 -48h 扩到 -730天：历史虚拟样本只应属于其生成当天，跨天后必须清空，
 //      否则微信 iOS（读取窗口宽于当天）会把昨天/前天的虚拟残留算进今天的步数
+// v1.0.6：cleanupOnLaunch 改用 deleteOldVirtualKeepToday（排除今天，保留当天已生成数据）；
+//         generateNow 仍用全量版（生成前清理避免叠加）。
 - (void)deleteOldVirtual:(void(^)(BOOL))cb {
     NSDate *start = [[NSDate date] dateByAddingTimeInterval:-730*24*3600];
     NSDate *end   = [[NSDate date] dateByAddingTimeInterval: 48*3600];
     NSPredicate *timePred = [HKQuery predicateForSamplesWithStartDate:start endDate:end options:HKQueryOptionStrictStartDate];
+    [self deleteVirtualWithPredicate:timePred cb:cb];
+}
+
+// v1.0.6：App 启动清理专用窗口——只删「昨天及更早」(-730d~今天0点) 与「明天及以后」(今天23:59~+48h)，
+// 保留今天已生成的虚拟样本（否则用户每次打开 App 都会把定时/手动刚生成的步数删掉，
+// 实测 12:09 打开 App 把 11:57 定时生成的 1000 步全删了）
+- (void)deleteOldVirtualKeepToday:(void(^)(BOOL))cb {
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *now = [NSDate date];
+    NSDate *todayStart = [cal startOfDayForDate:now];
+    NSDate *todayEnd = [todayStart dateByAddingTimeInterval:24*3600]; // 明天 0 点
+    NSDate *start = [now dateByAddingTimeInterval:-730*24*3600];
+    NSDate *end   = [now dateByAddingTimeInterval: 48*3600];
+    NSPredicate *hist = [HKQuery predicateForSamplesWithStartDate:start endDate:todayStart options:HKQueryOptionStrictStartDate];
+    NSPredicate *futr = [HKQuery predicateForSamplesWithStartDate:todayEnd endDate:end options:HKQueryOptionStrictStartDate];
+    NSPredicate *timePred = [NSCompoundPredicate orPredicateWithSubpredicates:@[hist, futr]];
+    [self deleteVirtualWithPredicate:timePred cb:cb];
+}
+
+- (void)deleteVirtualWithPredicate:(NSPredicate *)timePred cb:(void(^)(BOOL))cb {
     NSPredicate *m1 = [HKQuery predicateForObjectsWithMetadataKey:@"ucsVirtual"];
     NSPredicate *m2 = [HKQuery predicateForObjectsWithMetadataKey:@"com.sykes.ucs.virtualStep"];
     NSPredicate *metaPred = [NSCompoundPredicate orPredicateWithSubpredicates:@[m1, m2]];
@@ -149,10 +171,11 @@ static NSDictionary *UCSDefaultConfig(void) {
 // v1.0.2：App 每次启动后台清理历史虚拟残留（含原项目 com.sykes.ucs.virtualStep 老样本），
 // 不再只依赖「生成时」清理——若当天尚未生成，昨天/前天的虚拟残留会留在 HealthKit 里，
 // 微信跨天读取窗口会把它们算进今天的步数（用户实测 5901 = 前天/昨天残留 + 今天 1701）
+// v1.0.6：改用 KeepToday 窗口，打开 App 不再删当天已生成的数据
 - (void)cleanupOnLaunch {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-        [self deleteOldVirtual:^(BOOL ok) {
-            ULog(@"cleanupOnLaunch: deleteOldVirtual ok=%d", ok);
+        [self deleteOldVirtualKeepToday:^(BOOL ok) {
+            ULog(@"cleanupOnLaunch: deleteOldVirtualKeepToday ok=%d", ok);
         }];
     });
 }
