@@ -96,6 +96,10 @@ static NSDictionary *UCSDefaultConfig(void) {
 // ================= HealthKit 管理器 =================
 @interface UCSHealth : NSObject
 @property (nonatomic, strong) HKHealthStore *store;
+// v1.0.8：检测到锁屏后 HealthKit 数据保护（Code 6）。此时删/读不可用，
+// 但写入会被接受存临时文件、解锁后合并——会导致旧样本删不掉、新样本叠加。
+// 检测到则不写新样本、不写 lastgen，让 daemon 解锁后重试。
+@property (nonatomic, assign) BOOL protectedLocked;
 - (BOOL)isAuthorized;
 - (void)requestAuth:(void(^)(BOOL))cb;
 - (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb;
@@ -184,7 +188,12 @@ static NSDictionary *UCSDefaultConfig(void) {
     if (i >= types.count) { cb(YES); return; }
     HKQuantityType *type = types[i];
     [self.store deleteObjectsOfType:type predicate:pred withCompletion:^(BOOL success, NSUInteger count, NSError *error) {
-        if (error) ULog(@"deleteOldVirtual(%@) error: %@", type.identifier, error);
+        if (error) {
+            ULog(@"deleteOldVirtual(%@) error: %@", type.identifier, error);
+            // v1.0.8：HKError.Code 6 = errorDatabaseInaccessible（锁屏>10分钟，数据保护类已锁定）。
+            // 此时写入虽被接受但会叠加，标记 protectedLocked，上层据此放弃本次写入。
+            if (error.code == 6) { self.protectedLocked = YES; }
+        }
         ULog(@"deleted %lu old virtual %@ samples", (unsigned long)count, type.identifier);
         [self deleteTypeInArray:types index:i+1 predicate:pred cb:cb];
     }];
@@ -297,8 +306,15 @@ static NSDictionary *UCSDefaultConfig(void) {
 }
 
 // 生成主流程：删旧 -> 写新
+// v1.0.8：若删旧阶段检测到数据保护锁定（Code 6），放弃写入（避免旧样本删不掉导致叠加），
+// 直接回调 NO，由上层决定不写 lastgen、等 daemon 重试。
 - (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
     [self deleteOldVirtual:^(BOOL ok) {
+        if (self.protectedLocked) {
+            ULog("generateNow: data protected locked, skip write (will retry after unlock)");
+            cb(NO);
+            return;
+        }
         [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
             cb(ok && ok2);
         }];
@@ -735,10 +751,16 @@ static NSDictionary *UCSDefaultConfig(void) {
         __block BOOL done = NO;
         [h generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
             ULog(@"auto generate result ok=%d", ok);
-            // lastgen 双视图写入
-            [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            [UCSHealth syncWeChat];
+            // v1.0.8：锁屏数据保护锁定时 ok=NO 且 protectedLocked=YES，
+            // 不写 lastgen、不同步微信——daemon 下一轮（解锁后）会重试。
+            if (ok && !h.protectedLocked) {
+                // lastgen 双视图写入
+                [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                [UCSHealth syncWeChat];
+            } else if (h.protectedLocked) {
+                ULog(@"auto generate skipped: HealthKit protected locked (wait for unlock)");
+            }
             done = YES;
             CFRunLoopStop(CFRunLoopGetMain());
         }];
