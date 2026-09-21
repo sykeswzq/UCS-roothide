@@ -104,6 +104,8 @@ static NSDictionary *UCSDefaultConfig(void) {
 - (void)requestAuth:(void(^)(BOOL))cb;
 - (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb;
 + (NSString *)todayString;
++ (void)syncWeChat;
++ (void)writeStepsFile:(NSInteger)steps;
 @end
 
 @implementation UCSHealth
@@ -340,6 +342,86 @@ static NSDictionary *UCSDefaultConfig(void) {
     const char *ui_path = FindTool(@"/var/jb/usr/bin/uiopen", @"/usr/bin/uiopen");
     int rc2 = ui_path ? posix_spawn(&pid, ui_path, NULL, NULL, ui_argv, environ) : -1;
     ULog(@"syncWeChat: uiopen rc=%d (tool=%s)", rc2, ui_path ?: "none");
+}
+
+// ================= v1.0.11：写 hb_steps.txt 供 StepFaker tweak 读取（移植自 v4.4.25 验证版） =================
+// StepFaker 注入到微信进程后，从多条通道读「虚拟步数增量」，hook CMPedometer/HealthKit 返回 真实+虚拟。
+// 微信是普通 App Store 应用、跑在沙盒里读不到外部文件，故必须把 hb_steps.txt 写进微信自己的数据容器。
+// 文件格式：第一行数字，第二行 date:YYYY-MM-DD（tweak 据此做「今天」校验，避免跨天残留）。
++ (NSString *)hbDateLine {
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyy-MM-dd";
+    return [NSString stringWithFormat:@"date:%@", [f stringFromDate:[NSDate date]]];
+}
+
++ (void)hbWriteContent:(NSString *)content toPath:(NSString *)path label:(NSString *)label {
+    NSError *err = nil;
+    BOOL ok = [[content dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES];
+    if (ok) [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:path error:nil];
+    ULog(@"hb_steps %@ ok=%d path=%@", label, ok, path);
+}
+
+// 扫描所有微信相关数据容器（主微信 com.tencent.xin、UGGD、com.tencent.* 扩展）
++ (NSArray<NSString *> *)hbWeChatContainers {
+    NSMutableArray *out = [NSMutableArray array];
+    // roothide App 视图 + 真实视图都扫一遍
+    NSArray *bases = @[ @"/var/mobile/Containers/Data/Application",
+                        @"/var/roothide/var/mobile/Containers/Data/Application",
+                        @"/rootfs/private/var/mobile/Containers/Data/Application" ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *base in bases) {
+        NSArray *dirs = [fm contentsOfDirectoryAtPath:base error:nil];
+        for (NSString *d in dirs) {
+            NSString *meta = [base stringByAppendingFormat:@"/%@/.com.apple.mobile_container_manager.metadata.plist", d];
+            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
+            NSString *ident = dict[@"MCMMetadataIdentifier"];
+            if ([ident isEqualToString:@"com.tencent.xin"] ||
+                [ident isEqualToString:@"UGGD"] ||
+                [ident hasPrefix:@"com.tencent"]) {
+                [out addObject:[base stringByAppendingFormat:@"/%@", d]];
+            }
+        }
+    }
+    return out;
+}
+
++ (void)writeStepsFile:(NSInteger)steps {
+    @autoreleasepool {
+        NSString *content = [NSString stringWithFormat:@"%ld\n%@\n", (long)steps, [self hbDateLine]];
+        NSFileManager *fm = [NSFileManager defaultManager];
+
+        // 通道 1：写进微信自己的数据容器 Documents（沙盒内必定可读，主通道）
+        NSArray *containers = [self hbWeChatContainers];
+        for (NSString *c in containers) {
+            NSString *doc = [c stringByAppendingPathComponent:@"Documents"];
+            if (![fm fileExistsAtPath:doc]) [fm createDirectoryAtPath:doc withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *p = [doc stringByAppendingPathComponent:@"hb_steps.txt"];
+            if ([fm fileExistsAtPath:p]) [fm removeItemAtPath:p error:nil];
+            [self hbWriteContent:content toPath:p label:@"wechat-container"];
+        }
+        ULog(@"hb_steps wechat containers count=%lu", (unsigned long)containers.count);
+
+        // 通道 2：/var/mobile/Documents（App 视图 + rootfs 真实视图）
+        [self hbWriteContent:content toPath:@"/var/mobile/Documents/hb_steps.txt" label:@"var-mobile-doc"];
+        [self hbWriteContent:content toPath:@"/rootfs/private/var/mobile/Documents/hb_steps.txt" label:@"rootfs-doc"];
+
+        // 通道 3：App 自身容器 Documents（tweak ②c 会枚举 com.sykes.ucs.app 容器）
+        NSString *ownDoc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        if (ownDoc) [self hbWriteContent:content toPath:[ownDoc stringByAppendingPathComponent:@"hb_steps.txt"] label:@"own-container"];
+
+        // 通道 4：/var/mobile/Media/HealthBoost（无沙盒进程可读）
+        NSString *mediaDir = @"/var/mobile/Media/HealthBoost";
+        if (![fm fileExistsAtPath:mediaDir]) [fm createDirectoryAtPath:mediaDir withIntermediateDirectories:YES attributes:nil error:nil];
+        [self hbWriteContent:content toPath:[mediaDir stringByAppendingPathComponent:@"hb_steps.txt"] label:@"media"];
+
+        // 通道 5：CFPreferences 系统域
+        CFPreferencesSetValue(CFSTR("steps"), (__bridge CFNumberRef)@(steps),
+                              CFSTR("com.apple.mobile.healthboost"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+        CFPreferencesSetValue(CFSTR("stepsDate"), (__bridge CFStringRef)[[self hbDateLine] substringFromIndex:5],
+                              CFSTR("com.apple.mobile.healthboost"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+        CFPreferencesSynchronize(CFSTR("com.apple.mobile.healthboost"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+        ULog(@"hb_steps writeStepsFile done steps=%ld", (long)steps);
+    }
 }
 
 @end
@@ -667,7 +749,11 @@ static NSDictionary *UCSDefaultConfig(void) {
         // lastgen 双视图写入（App 沙盒视图 + 真实视图）
         [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
         [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        [UCSHealth syncWeChat];
+        if (ok) {
+            // v1.0.11：写 hb_steps.txt 供 StepFaker 读取后，再重启微信
+            [UCSHealth writeStepsFile:steps];
+            [UCSHealth syncWeChat];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             ws.busy = NO;
             [ws updateStatus:ok
@@ -757,6 +843,8 @@ static NSDictionary *UCSDefaultConfig(void) {
                 // lastgen 双视图写入
                 [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                // v1.0.11：写 hb_steps.txt 供 StepFaker 读取后，再重启微信
+                [UCSHealth writeStepsFile:steps];
                 [UCSHealth syncWeChat];
             } else if (h.protectedLocked) {
                 ULog(@"auto generate skipped: HealthKit protected locked (wait for unlock)");
