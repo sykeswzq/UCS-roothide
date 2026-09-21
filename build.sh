@@ -7,7 +7,7 @@
 #   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
 set -eu
 
-VER=1.0.7
+VER=1.0.8
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
