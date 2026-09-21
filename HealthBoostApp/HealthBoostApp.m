@@ -126,16 +126,33 @@ static NSDictionary *UCSDefaultConfig(void) {
     }];
 }
 
-// 删除旧的虚拟样本：metadata ucsVirtual=YES，窗口覆盖 -48h ~ +48h（未来样本也删得到）
-// BUG 修复：原来只删 stepType，导致楼层/距离每次生成都叠加；现改为串行删除三种类型
+// 删除旧的虚拟样本：窗口覆盖全部历史(-730天) ~ +48h（未来样本也删得到）
+// v1.0.2 修复跨天污染：
+//   1) metadata 同时认 ucsVirtual（本 App）与 com.sykes.ucs.virtualStep（原 sykeswzq/UCS 残留标记，
+//      旧版只认 ucsVirtual 导致原项目老样本永远删不掉，微信跨天窗口把它们算进今天）
+//   2) 窗口从 -48h 扩到 -730天：历史虚拟样本只应属于其生成当天，跨天后必须清空，
+//      否则微信 iOS（读取窗口宽于当天）会把昨天/前天的虚拟残留算进今天的步数
 - (void)deleteOldVirtual:(void(^)(BOOL))cb {
-    NSDate *start = [[NSDate date] dateByAddingTimeInterval:-48*3600];
+    NSDate *start = [[NSDate date] dateByAddingTimeInterval:-730*24*3600];
     NSDate *end   = [[NSDate date] dateByAddingTimeInterval: 48*3600];
     NSPredicate *timePred = [HKQuery predicateForSamplesWithStartDate:start endDate:end options:HKQueryOptionStrictStartDate];
-    NSPredicate *metaPred = [HKQuery predicateForObjectsWithMetadataKey:@"ucsVirtual"];
+    NSPredicate *m1 = [HKQuery predicateForObjectsWithMetadataKey:@"ucsVirtual"];
+    NSPredicate *m2 = [HKQuery predicateForObjectsWithMetadataKey:@"com.sykes.ucs.virtualStep"];
+    NSPredicate *metaPred = [NSCompoundPredicate orPredicateWithSubpredicates:@[m1, m2]];
     NSPredicate *pred = [NSCompoundPredicate andPredicateWithSubpredicates:@[timePred, metaPred]];
     NSArray *types = @[[self stepType], [self distType], [self flightsType]];
     [self deleteTypeInArray:types index:0 predicate:pred cb:cb];
+}
+
+// v1.0.2：App 每次启动后台清理历史虚拟残留（含原项目 com.sykes.ucs.virtualStep 老样本），
+// 不再只依赖「生成时」清理——若当天尚未生成，昨天/前天的虚拟残留会留在 HealthKit 里，
+// 微信跨天读取窗口会把它们算进今天的步数（用户实测 5901 = 前天/昨天残留 + 今天 1701）
+- (void)cleanupOnLaunch {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        [self deleteOldVirtual:^(BOOL ok) {
+            ULog(@"cleanupOnLaunch: deleteOldVirtual ok=%d", ok);
+        }];
+    });
 }
 
 - (void)deleteTypeInArray:(NSArray *)types index:(NSUInteger)i predicate:(NSPredicate *)pred cb:(void(^)(BOOL))cb {
@@ -150,12 +167,19 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 // 写入新样本：优先使用最近 120 分钟内无真实样本的「空分钟」（往过去写，时间贴近实际且不被去重）；
 // 空分钟不足时回退到 now+5min 起未来时间（兜底，保持可用）
+// v1.0.2 跨天修复：兜底未来时间钳制到「当天 23:59:00」——23:58 生成时 now+5min 会落到明天 00:03，
+// 样本跨天导致当天/昨天的统计都被搅乱
 - (void)writeSamples:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
     NSInteger batch = 500;
     NSInteger n = MAX(1, (steps + batch - 1) / batch);
     [self findEmptyMinutes:^(NSArray<NSDate *> *emptyMin) {
         NSMutableArray *samples = [NSMutableArray array];
-        NSTimeInterval nowT = [[NSDate date] timeIntervalSinceReferenceDate];
+        NSDate *nowDate = [NSDate date];
+        NSTimeInterval nowT = [nowDate timeIntervalSinceReferenceDate];
+        NSCalendar *cal = [NSCalendar currentCalendar];
+        NSDate *startOfDay = [cal startOfDayForDate:nowDate];
+        NSDate *endOfDay = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:startOfDay options:0];
+        NSTimeInterval maxSt = [endOfDay timeIntervalSinceReferenceDate] - 60.0;   // 当天 23:59:00
         NSInteger remaining = steps;
         double distRemaining = dist;
         NSInteger flightsRemaining = flights;
@@ -168,6 +192,7 @@ static NSDictionary *UCSDefaultConfig(void) {
                 st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 空分钟（最近优先）
             } else {
                 st = nowT + (i + 1) * 5 * 60;                        // 兜底：未来时间
+                if (st > maxSt) st = maxSt;                          // v1.0.2：钳制当天 23:59
             }
             NSTimeInterval en = st + 60;
             NSDate *sd = [NSDate dateWithTimeIntervalSinceReferenceDate:st];
@@ -209,9 +234,15 @@ static NSDictionary *UCSDefaultConfig(void) {
 }
 
 // 查询最近 120 分钟内的「空分钟」：没有真实步数样本占用的整分钟，从最近到最旧排序
+// v1.0.2 跨天修复：窗口起点钳制到「今天 0 点」——凌晨自动生成时（如 00:30），
+// 原窗口 now-120min 会覆盖昨天 22:30~23:59，把虚拟样本写进昨天的分钟里，
+// 微信跨天窗口会把它们算进「今天」。钳制后凌晨生成的样本只会落在今天。
 - (void)findEmptyMinutes:(void(^)(NSArray<NSDate *> *))cb {
     NSDate *now = [NSDate date];
     NSDate *start = [now dateByAddingTimeInterval:-120*60];
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *startOfDay = [cal startOfDayForDate:now];
+    if ([start compare:startOfDay] == NSOrderedAscending) start = startOfDay;
     NSPredicate *pred = [HKQuery predicateForSamplesWithStartDate:start endDate:now options:HKQueryOptionStrictStartDate];
     HKSampleQuery *q = [[HKSampleQuery alloc] initWithSampleType:[self stepType] predicate:pred limit:HKObjectQueryNoLimit sortDescriptors:nil resultsHandler:^(HKSampleQuery *query, NSArray<HKSample *> *results, NSError *error) {
         NSMutableSet *occ = [NSMutableSet set];
@@ -311,6 +342,8 @@ static NSDictionary *UCSDefaultConfig(void) {
     // App 在 mobile 用户上下文运行，自行加载/兜底 LaunchAgent
     // （postinst 以 root 运行 bootstrap 可能失败 exit=45，App 内加载才是 roothide 验证过的方式）
     [self ensureLaunchAgentLoaded];
+    // v1.0.2：每次启动即清理历史虚拟残留（跨天污染修复，不依赖生成时清理）
+    [self.health cleanupOnLaunch];
     [self updateStatus:@"点击「生成运动数据」后，步数将写入健康，微信运动自动同步。"];
 
     // 首次请求 HealthKit 授权（仅首次弹窗）
@@ -371,15 +404,28 @@ static NSDictionary *UCSDefaultConfig(void) {
         NSString *lcStr = JBPath(@"/var/jb/usr/bin/launchctl");
         const char *lc = lcStr.UTF8String;
         if (access(lc, X_OK) != 0) lc = "/usr/bin/launchctl";
-        pid_t pid;
-        // bootstrap 已在运行则先 bootout（幂等）
-        char *b1[] = { (char *)"launchctl", (char *)"bootout", (char *)"user/foreground/com.sykes.ucs.schedule", NULL };
-        posix_spawn(&pid, lc, NULL, NULL, b1, NULL);
-        usleep(300 * 1000);
-        char *b2[] = { (char *)"launchctl", (char *)"bootstrap", (char *)"user/foreground", (char *)[plist UTF8String], NULL };
-        int rc = posix_spawn(&pid, lc, NULL, NULL, b2, NULL);
-        int st = 0; if (rc == 0) waitpid(pid, &st, 0);
-        ULog(@"ensureLaunchAgent: bootstrap rc=%d status=%d plist=%s", rc, st, plist.UTF8String);
+        // v1.0.2：posix_spawn 拿不到 launchctl 的 stderr（v1.0.1 的 bootstrap status=256 原因未知），
+        // 改用 popen 捕获完整输出（bootout 的 stderr 也一起），把真实报错写进日志定位根因
+        NSString *cmd = [NSString stringWithFormat:
+            @"%s bootout user/foreground/com.sykes.ucs.schedule 2>&1; "
+            @"echo BOOTOUT_RC=$?; "
+            @"%s bootstrap user/foreground '%@' 2>&1; "
+            @"echo BOOTSTRAP_RC=$?",
+            lc, lc, plist];
+        FILE *fp = popen(cmd.UTF8String, "r");
+        NSMutableString *out = [NSMutableString string];
+        if (fp) {
+            char buf[512];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf)-1, fp)) > 0) {
+                buf[n] = 0;
+                [out appendFormat:@"%s", buf];
+            }
+            int prc = pclose(fp);
+            ULog(@"ensureLaunchAgent: pclose=%d output:\n%@", prc, out);
+        } else {
+            ULog(@"ensureLaunchAgent: popen failed");
+        }
     });
 }
 
