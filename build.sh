@@ -7,7 +7,7 @@
 #   4) App 单 arm64e；StepFaker 必须 fat(arm64+arm64e)，微信主进程是 arm64 才会选 arm64 slice 加载
 set -eu
 
-VER=1.0.14
+VER=1.0.15
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -186,12 +186,15 @@ while true; do
   LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
   [ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
   if [ "$LAST" = "$TODAY" ]; then sleep 30; continue; fi
+  # v1.0.15：回退 uiopen 方案（--cli 实测 HealthKit 命令行上下文写不了）。
+  # touch marker 双视图 + su mobile uiopen 拉起 App；App 检测 marker 在加载界面前就生成并 exit，
+  # 不显示主界面（仅 iOS 启动画面一闪，无法消除）。锁屏 protectedLocked 时 skip，解锁后下一轮重试。
+  touch /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
+  touch /var/mobile/Documents/ucs_wake.marker
+  chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
+  chmod 666 /var/mobile/Documents/ucs_wake.marker
   echo "wake $(date) now=$N sched=$S last=$LAST" >> "$LOG"
-  # v1.0.14：直接跑 UCS --cli 命令行生成，不 uiopen 拉起 UIKit，零启动画面闪现。
-  # 以 mobile 用户执行；--cli 在 main() 里调 runAutoIfDue（删旧->写新->同步微信->写 lastgen），
-  # 不启动 UIApplicationMain、不显示 Launch Screen。锁屏 protectedLocked 时 App 自动 skip，
-  # 解锁后下一轮（30s 内）脚本重试直到成功。
-  /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
+  nohup /usr/bin/su mobile -c "/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 &
   sleep 60
 done
 SCREOF
