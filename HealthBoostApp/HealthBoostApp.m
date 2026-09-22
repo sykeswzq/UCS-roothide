@@ -313,12 +313,13 @@ static NSDictionary *UCSDefaultConfig(void) {
 - (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
     [self deleteOldVirtual:^(BOOL ok) {
         if (self.protectedLocked) {
-            ULog(@"generateNow: data protected locked, skip write (will retry after unlock)");
-            cb(NO);
-            return;
+            // v1.0.16：Apple 官方 errorDatabaseInaccessible 说明——锁屏时查询会报 Code6，
+            // 但 save 仍被接受（暂存临时文件，解锁后自动合并）。故锁屏时不放弃写入，
+            // 跳过本次 delete（历史样本靠下次解锁后 cleanupOnLaunch 清理），直接 save。
+            ULog(@"generateNow: locked, skip delete but save directly (Apple: locked save allowed)");
         }
         [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
-            cb(ok && ok2);
+            cb(ok2);
         }];
     }];
 }
@@ -839,15 +840,20 @@ static NSDictionary *UCSDefaultConfig(void) {
             ULog(@"auto generate result ok=%d", ok);
             // v1.0.8：锁屏数据保护锁定时 ok=NO 且 protectedLocked=YES，
             // 不写 lastgen、不同步微信——daemon 下一轮（解锁后）会重试。
-            if (ok && !h.protectedLocked) {
-                // lastgen 双视图写入
+            if (ok) {
+                // v1.0.16：save 成功即落盘（锁屏下 Apple 允许 save，解锁自动合并）。
+                // lastgen 双视图写入，标记今天已生成，避免重复。
                 [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 [today writeToFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                // v1.0.11：写 hb_steps.txt 供 StepFaker 读取后，再重启微信
+                // 写 hb_steps.txt 供 StepFaker 读取
                 [UCSHealth writeStepsFile:steps];
-                [UCSHealth syncWeChat];
-            } else if (h.protectedLocked) {
-                ULog(@"auto generate skipped: HealthKit protected locked (wait for unlock)");
+                if (!h.protectedLocked) {
+                    // 亮屏：重启微信触发上传
+                    [UCSHealth syncWeChat];
+                } else {
+                    // 锁屏：拉不起微信前台，hb_steps 已写今天；解锁后开微信即读今天值
+                    ULog(@"locked: saved, wechat will pick up on next open");
+                }
             }
             done = YES;
             CFRunLoopStop(CFRunLoopGetMain());
