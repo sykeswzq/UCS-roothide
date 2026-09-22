@@ -7,7 +7,7 @@
 #   4) App 单 arm64e；StepFaker 必须 fat(arm64+arm64e)，微信主进程是 arm64 才会选 arm64 slice 加载
 set -eu
 
-VER=1.0.20
+VER=1.0.21
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -96,28 +96,6 @@ if [ "$smagic" != "cafebabe" ]; then
 fi
 echo "  tweak signed OK (magic=$smagic FAT arm64+arm64e, $(wc -c < tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib) bytes)"
 
-echo "[3.5/5] Compile SpringBoardTimer tweak (fat arm64+arm64e)"
-# v1.0.19: 注入 SpringBoard 定时器，到点后台拉起 UCS --cli，不闪 Launch Screen
-xcrun --sdk iphoneos clang \
-  -dynamiclib -fobjc-arc \
-  -framework Foundation \
-  -framework CoreFoundation \
-  -arch arm64 -arch arm64e \
-  -mios-version-min=15.0 \
-  -isysroot "$SDK" \
-  -o tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib \
-  SpringBoardTimer.m
-chmod 755 tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib
-cp SpringBoardTimer.plist tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.plist
-chmod 644 tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.plist
-ldid -S tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib
-sbmagic=$(xxd -p -l4 tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib 2>/dev/null | tr -d '\n')
-if [ "$sbmagic" != "cafebabe" ] && [ "$sbmagic" != "cffaedfe" ]; then
-  echo "ERROR: SpringBoardTimer magic=$sbmagic (expected cafebabe FAT or cffaedfe)"
-  exit 1
-fi
-echo "  SpringBoardTimer signed OK (magic=$sbmagic)"
-
 echo "[4/5] Merge tweak + control + postinst"
 cp -R tweak_staging/Library staging/
 
@@ -147,18 +125,6 @@ chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.dyli
 chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist 2>/dev/null || true
 chmod 755 /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null || true
 chmod 644 /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist 2>/dev/null || true
-
-# v1.0.19: SpringBoardTimer dylib 权限
-chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib 2>/dev/null || true
-chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.plist 2>/dev/null || true
-chmod 755 /var/jb/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib 2>/dev/null || true
-chmod 644 /var/jb/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.plist 2>/dev/null || true
-
-# v1.0.19: 停掉旧 LaunchAgent 方案（改用 SpringBoardTimer 注入，不再需要 uiopen）
-launchctl bootout user/foreground/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
-rm -f /var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
-rm -f /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
-echo "old LaunchAgent removed" >> "$LOG"
 
 # 默认配置（XML plist，供 launchd 脚本 plutil 读取；App 首次打开会覆盖）
 CFG=/var/mobile/Documents/ucs_config.plist
@@ -220,15 +186,10 @@ while true; do
   LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
   [ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
   if [ "$LAST" = "$TODAY" ]; then sleep 30; continue; fi
-  # v1.0.15：回退 uiopen 方案（--cli 实测 HealthKit 命令行上下文写不了）。
-  # touch marker 双视图 + su mobile uiopen 拉起 App；App 检测 marker 在加载界面前就生成并 exit，
-  # 不显示主界面（仅 iOS 启动画面一闪，无法消除）。锁屏 protectedLocked 时 skip，解锁后下一轮重试。
-  touch /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
-  touch /var/mobile/Documents/ucs_wake.marker
-  chmod 666 /rootfs/private/var/mobile/Documents/ucs_wake.marker 2>/dev/null
-  chmod 666 /var/mobile/Documents/ucs_wake.marker
-  echo "wake $(date) now=$N sched=$S last=$LAST" >> "$LOG"
-  nohup /usr/bin/su mobile -c "/usr/bin/uiopen ucs://generate" >> "$LOG" 2>&1 &
+  # v1.0.21: 直接跑 UCS --cli，不走 UIApplicationMain，不闪 Launch Screen。
+  # --cli 已实测 HealthKit + 微信同步完全工作（v1.0.21 SSH 测试通过）。
+  echo "trigger $(date) now=$N sched=$S last=$LAST" >> "$LOG"
+  nohup /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
   sleep 60
 done
 SCREOF
@@ -291,10 +252,6 @@ for k in /var/jb/usr/bin/killall /usr/bin/killall killall; do
   if [ -x "$k" ]; then "$k" -9 WeChat >> "$LOG" 2>&1 || true; break; fi
 done
 echo "=== postinst done ===" >> "$LOG"
-# v1.0.19: respring 让 SpringBoard 加载 SpringBoardTimer.dylib
-for r in /var/jb/usr/bin/launchctl /usr/bin/launchctl; do
-  if [ -x "$r" ]; then "$r" kill SpringBoard >> "$LOG" 2>&1 || true; break; fi
-done
 exit 0
 POSTINST_EOF
 chmod 755 staging/DEBIAN/postinst
