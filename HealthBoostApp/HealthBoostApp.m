@@ -314,14 +314,15 @@ static NSDictionary *UCSDefaultConfig(void) {
 - (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
     [self deleteOldVirtual:^(BOOL ok) {
         if (self.protectedLocked) {
-            // v1.0.16：Apple 官方 errorDatabaseInaccessible 说明——锁屏时查询会报 Code6，
-            // 但 save 仍被接受（暂存临时文件，解锁后自动合并）。故锁屏时不放弃写入，
-            // 跳过本次 delete（历史样本靠下次解锁后 cleanupOnLaunch 清理），直接 save。
             ULog(@"generateNow: locked, skip delete but save directly (Apple: locked save allowed)");
         }
-        [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
-            cb(ok2);
-        }];
+        // v1.0.18: delete is async, wait 0.5s before findEmptyMinutes to avoid stale results
+        ULog(@"generateNow: delete done, wait 0.5s for persistence...");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
+                cb(ok2);
+            }];
+        });
     }];
 }
 
