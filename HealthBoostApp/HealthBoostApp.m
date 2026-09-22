@@ -1,4 +1,4 @@
-﻿// HealthBoostApp.m - UCS App 涓荤▼搴忥紙鍏ㄦ柊瀹炵幇锛?// 鍔熻兘锛氭墜鍔ㄧ敓鎴愯櫄鎷熸鏁?璺濈/妤煎眰鍒?HealthKit锛涘畾鏃惰嚜鍔ㄧ敓鎴愶紱寰俊鍚屾瑙﹀彂
+// HealthBoostApp.m - UCS App 涓荤▼搴忥紙鍏ㄦ柊瀹炵幇锛?// 鍔熻兘锛氭墜鍔ㄧ敓鎴愯櫄鎷熸鏁?璺濈/妤煎眰鍒?HealthKit锛涘畾鏃惰嚜鍔ㄧ敓鎴愶紱寰俊鍚屾瑙﹀彂
 // 鐜锛歳oothide (Dopamine) / arm64e / iOS 15+
 #import <UIKit/UIKit.h>
 #import <HealthKit/HealthKit.h>
