@@ -107,47 +107,52 @@ static BOOL HBFileIsToday(NSString *path) {
     return (a.year == b.year && a.month == b.month && a.day == b.day);
 }
 
-// 解析步数文件：第一行是数字，第二行可选 date:YYYY-MM-DD。
-// outFresh 仅用于诊断日志，不影响取值。
-static void HBParseStepsFile(NSString *path, NSInteger *outVal, BOOL *outFresh) {
+// 解析步数文件：第一行是数字，第二行 date:YYYY-MM-DD。
+// v1.0.13：严格只认文件内 date: 行 == 今天；删除“按文件修改时间(mtime)判今天”的兜底。
+// 旧逻辑会把昨天生成的 hb_steps.txt（date:昨天、mtime=昨天）在今天误判成有效，导致昨天虚拟
+// 步数叠加到今天（微信 9558 vs 健康 558 的跨天残留 bug）。mtime 不可靠（容器恢复/同步会改），
+// 故唯一新鲜依据是文件第二行 date: 等于今天。outDate 返回解析到的日期字符串(无则 nil)供日志。
+static void HBParseStepsFile(NSString *path, NSInteger *outVal, BOOL *outFresh, NSString **outDate) {
     *outVal = 0; *outFresh = NO;
+    if (outDate) *outDate = nil;
     if (!path) return;
     NSString *c = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (c.length == 0) return;
     NSArray *lines = [c componentsSeparatedByString:@"\n"];
     *outVal = [lines.firstObject integerValue];
-    BOOL fresh = NO;
     if (lines.count > 1) {
         NSString *second = [lines[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if ([second hasPrefix:@"date:"]) {
-            fresh = [[second substringFromIndex:5] isEqualToString:HBFakeTodayString()];
+            NSString *d = [second substringFromIndex:5];
+            if (outDate) *outDate = d;
+            *outFresh = [d isEqualToString:HBFakeTodayString()];
         }
     }
-    if (!fresh) fresh = HBFileIsToday(path);
-    *outFresh = fresh;
 }
 
 // 读取目标步数（0 = 不篡改，原样放行）。
-// v1.0.202：文件值 = 当前目标，不限「今天」；日期只进日志。
+// v1.0.13：只采用文件内 date:==今天 的虚拟值（跨天归零，昨天残留不叠加）。
 static NSInteger HBReadVirtualSteps(void) {
     @autoreleasepool {
         // ① 进程自身容器里的 hb_steps.txt（微信容器由 App 写入）
         NSInteger fileVal = 0;
         BOOL fileFresh = NO;
+        NSString *fileDate = nil;
         NSString *filePath = nil;
         NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(
             NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *doc = paths.firstObject;
         if (doc.length > 0) {
             filePath = [doc stringByAppendingPathComponent:@"hb_steps.txt"];
-            HBParseStepsFile(filePath, &fileVal, &fileFresh);
+            HBParseStepsFile(filePath, &fileVal, &fileFresh, &fileDate);
         }
         // ② 共享通道：App 把假步数统一写到用户 home 的
         //    /var/mobile/Documents/hb_steps.txt，任何进程都能直接读到，
         //    不依赖各 App 自身沙盒容器。
         NSInteger sharedVal = 0;
         BOOL sharedFresh = NO;
-        HBParseStepsFile(@"/var/mobile/Documents/hb_steps.txt", &sharedVal, &sharedFresh);
+        NSString *sharedDate = nil;
+        HBParseStepsFile(@"/var/mobile/Documents/hb_steps.txt", &sharedVal, &sharedFresh, &sharedDate);
 
         // ②b roothide 修复（核心）：UCS App 是 roothide 应用，其 /var/mobile 被重映射
         //    到 /var/roothide/var/mobile。App 写的 /var/mobile/Documents/hb_steps.txt
@@ -156,7 +161,8 @@ static NSInteger HBReadVirtualSteps(void) {
         //    「健康加、微信没加」的根因。这里额外读 roothide 前缀下的真实文件补全通道。
         NSInteger rhVal = 0;
         BOOL rhFresh = NO;
-        HBParseStepsFile(@"/var/roothide/var/mobile/Documents/hb_steps.txt", &rhVal, &rhFresh);
+        NSString *rhDate = nil;
+        HBParseStepsFile(@"/var/roothide/var/mobile/Documents/hb_steps.txt", &rhVal, &rhFresh, &rhDate);
 
         // ②c roothide 修复：读取 UCS App 自身容器（com.sykes.ucs.app）。普通 App 进程的
         //    tweak 枚举真实 /var/roothide/var/mobile/Containers/Data/Application，找到
@@ -164,6 +170,7 @@ static NSInteger HBReadVirtualSteps(void) {
         //    是另一条不依赖 /var/mobile 重映射的稳妥通道。
         NSInteger appContainerVal = 0;
         BOOL appContainerFresh = NO;
+        NSString *appDate = nil;
         {
             NSString *base = @"/var/roothide/var/mobile/Containers/Data/Application";
             NSArray *dirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:nil];
@@ -172,7 +179,7 @@ static NSInteger HBReadVirtualSteps(void) {
                 NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
                 if ([[dict objectForKey:@"MCMMetadataIdentifier"] isEqualToString:@"com.sykes.ucs.app"]) {
                     NSString *p = [base stringByAppendingFormat:@"/%@/Documents/hb_steps.txt", d];
-                    HBParseStepsFile(p, &appContainerVal, &appContainerFresh);
+                    HBParseStepsFile(p, &appContainerVal, &appContainerFresh, &appDate);
                     break;
                 }
             }
@@ -201,6 +208,7 @@ static NSInteger HBReadVirtualSteps(void) {
             }
             CFRelease(val);
         }
+        NSString *cfDateStr = nil;
         CFPropertyListRef dateVal = CFPreferencesCopyValue(
             CFSTR("stepsDate"),
             CFSTR("com.apple.mobile.healthboost"),
@@ -208,7 +216,8 @@ static NSInteger HBReadVirtualSteps(void) {
             kCFPreferencesAnyHost);
         if (dateVal) {
             if (CFGetTypeID(dateVal) == CFStringGetTypeID()) {
-                cfFresh = [(__bridge NSString *)dateVal isEqualToString:HBFakeTodayString()];
+                cfDateStr = [(__bridge NSString *)dateVal copy];
+                cfFresh = [cfDateStr isEqualToString:HBFakeTodayString()];
             }
             CFRelease(dateVal);
         }
@@ -216,8 +225,14 @@ static NSInteger HBReadVirtualSteps(void) {
         NSInteger result = 0;
         if (fileValEffective > 0) result = fileValEffective;
         else if (cfFresh && cfVal > 0) result = cfVal;
-        HBProbeLog(@"READ_VIRTUAL: selfFile=%ld shared=%ld rh=%ld appContainer=%ld cfPref=%ld -> virtualOffset=%ld",
-                   (long)fileVal, (long)sharedVal, (long)rhVal, (long)appContainerVal, (long)cfVal, (long)result);
+        HBProbeLog(@"READ_VIRTUAL today=%@ self=%ld/%@ fresh=%d shared=%ld/%@ fresh=%d rh=%ld/%@ fresh=%d app=%ld/%@ fresh=%d cf=%ld/%@ fresh=%d -> offset=%ld",
+                   HBFakeTodayString(),
+                   (long)fileVal, fileDate ?: @"-", (int)fileFresh,
+                   (long)sharedVal, sharedDate ?: @"-", (int)sharedFresh,
+                   (long)rhVal, rhDate ?: @"-", (int)rhFresh,
+                   (long)appContainerVal, appDate ?: @"-", (int)appContainerFresh,
+                   (long)cfVal, cfDateStr ?: @"-", (int)cfFresh,
+                   (long)result);
         if (result == 99999 || result > 200000 || result <= 0) {
             HBProbeLog(@"READ_VIRTUAL_IGNORE: value=%ld 疑似残留脏值/哨兵/零增量，跳过累加（显示真实步数）", (long)result);
             return 0;
