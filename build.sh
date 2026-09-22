@@ -3,11 +3,11 @@
 # 约定（roothide 官方）：
 #   1) App 放相对路径 ./Applications/UCS.app -> 安装到 /var/roothide/Applications/UCS.app
 #   2) 注入库放 ./Library/MobileSubstrate/DynamicLibraries/
-#   3) ldid -M -S<entitlements> 签名
-#   4) 单 arm64e 架构（arm64+arm64e 双 slice 会导致不注入，勿改）
+#   3) App 用 ldid -S<entitlements>；tweak 用 ldid -S（无 -M，对齐 v4.4.25 可注入配置）
+#   4) App 单 arm64e；StepFaker 必须 fat(arm64+arm64e)，微信主进程是 arm64 才会选 arm64 slice 加载
 set -eu
 
-VER=1.0.12
+VER=1.0.13
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -81,7 +81,9 @@ chmod 755 tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib
 cp tweak/StepFaker.plist tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist
 chmod 644 tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist
 
-ldid -M -S tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib
+# v1.0.13：tweak 签名用 ldid -S（无 -M），对齐 v4.4.25 金标准。
+# 之前 v1.0.12 用 ldid -M -S 签 fat，dyld 拒载、微信进程无任何注入日志；实测去掉 -M 后注入正常。
+ldid -S tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib
 smagic=$(xxd -p -l4 tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null | tr -d '\n')
 # cafebabe=FAT(arm64+arm64e，预期)；cffaedfe=单 arm64e（不满足微信 arm64 注入，这里仅放行但下面校验 fat）
 if [ "$smagic" != "cafebabe" ] && [ "$smagic" != "cffaedfe" ]; then
