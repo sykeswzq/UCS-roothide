@@ -2,6 +2,9 @@
 // 不经过 uiopen，不闪 Launch Screen，锁屏也能触发（SpringBoard 永不挂）
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
+#import <spawn.h>
+#import <sys/wait.h>
+extern char **environ;
 
 static void SBLog(NSString *fmt, ...) {
     va_list args; va_start(args, fmt);
@@ -50,7 +53,14 @@ static void SBTick(void) {
         SBLog(@"trigger UCS --cli (sched=%02ld:%02ld now=%02ld:%02ld)",
               (long)schedH, (long)schedM, (long)now.hour, (long)now.minute);
         // 后台拉起 UCS --cli，不经过 uiopen，不闪 UI
-        system("/var/jb/Applications/UCS.app/UCS --cli > /var/mobile/Documents/ucs_cli.log 2>&1 &");
+        char *argv[] = {"/var/jb/Applications/UCS.app/UCS", "--cli", NULL};
+        pid_t pid;
+        int rc = posix_spawn(&pid, "/var/jb/Applications/UCS.app/UCS", NULL, NULL, argv, environ);
+        if (rc == 0) {
+            SBLog(@"spawned UCS --cli pid=%d", pid);
+        } else {
+            SBLog(@"spawn failed rc=%d", rc);
+        }
     } @catch (NSException *e) {
         SBLog(@"exception: %@", e);
     }
