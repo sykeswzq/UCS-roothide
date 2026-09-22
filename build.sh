@@ -96,13 +96,13 @@ if [ "$smagic" != "cafebabe" ]; then
 fi
 echo "  tweak signed OK (magic=$smagic FAT arm64+arm64e, $(wc -c < tweak_staging/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib) bytes)"
 
-echo "[3.5/5] Compile SpringBoardTimer tweak (arm64e only, inject SpringBoard)"
+echo "[3.5/5] Compile SpringBoardTimer tweak (fat arm64+arm64e)"
 # v1.0.19: 注入 SpringBoard 定时器，到点后台拉起 UCS --cli，不闪 Launch Screen
 xcrun --sdk iphoneos clang \
   -dynamiclib -fobjc-arc \
   -framework Foundation \
   -framework CoreFoundation \
-  -arch arm64e \
+  -arch arm64 -arch arm64e \
   -mios-version-min=15.0 \
   -isysroot "$SDK" \
   -o tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib \
@@ -112,8 +112,8 @@ cp SpringBoardTimer.plist tweak_staging/Library/MobileSubstrate/DynamicLibraries
 chmod 644 tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.plist
 ldid -S tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib
 sbmagic=$(xxd -p -l4 tweak_staging/Library/MobileSubstrate/DynamicLibraries/SpringBoardTimer.dylib 2>/dev/null | tr -d '\n')
-if [ "$sbmagic" != "cffaedfe" ]; then
-  echo "ERROR: SpringBoardTimer magic=$sbmagic (expected cffaedfe single arm64e)"
+if [ "$sbmagic" != "cafebabe" ] && [ "$sbmagic" != "cffaedfe" ]; then
+  echo "ERROR: SpringBoardTimer magic=$sbmagic (expected cafebabe FAT or cffaedfe)"
   exit 1
 fi
 echo "  SpringBoardTimer signed OK (magic=$sbmagic)"
