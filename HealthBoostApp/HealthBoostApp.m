@@ -70,9 +70,10 @@ void ULog(NSString *fmt, ...) {
 // ================= 配置读写（XML plist，launchd 脚本可用 plutil 读取） =================
 // v1.0.1：读配置双路（先 App 沙盒实际落盘视图，再真实视图），保证与 launchd 脚本一致
 static NSDictionary *UCSLoadConfig(void) {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:UCS_CFG];
+    // v1.0.21: App 实际写 ALT（沙盒视图），优先读 ALT；CFG 是 postinst 默认值/旧值。
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:UCS_CFG_ALT];
     if (d) return d;
-    return [NSDictionary dictionaryWithContentsOfFile:UCS_CFG_ALT];
+    return [NSDictionary dictionaryWithContentsOfFile:UCS_CFG];
 }
 
 static void UCSSaveConfig(NSDictionary *dict) {
@@ -281,7 +282,15 @@ static NSDictionary *UCSDefaultConfig(void) {
     if ([start compare:startOfDay] == NSOrderedAscending) start = startOfDay;
     NSPredicate *pred = [HKQuery predicateForSamplesWithStartDate:start endDate:now options:HKQueryOptionStrictStartDate];
     HKSampleQuery *q = [[HKSampleQuery alloc] initWithSampleType:[self stepType] predicate:pred limit:HKObjectQueryNoLimit sortDescriptors:nil resultsHandler:^(HKSampleQuery *query, NSArray<HKSample *> *results, NSError *error) {
-        if (error) { ULog(@"findEmptyMinutes query error, fallback future times"); cb(@[]); return; }
+        if (error) {
+            ULog(@"findEmptyMinutes query error (locked), fallback past times");
+            NSMutableArray *past = [NSMutableArray array];
+            for (NSInteger m = 5; m <= 120; m += 5) {
+                [past addObject:[now dateByAddingTimeInterval:-m*60]];
+            }
+            cb(past);
+            return;
+        }
         NSMutableSet *occ = [NSMutableSet set];
         NSDateFormatter *f = [[NSDateFormatter alloc] init];
         f.dateFormat = @"yyyyMMddHHmm";
