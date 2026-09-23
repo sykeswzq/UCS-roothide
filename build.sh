@@ -184,6 +184,9 @@ while true; do
   # 脚本不检查 lastgen，只到点跑 UCS。UCS 内部自己判断是否已生成。
   # 这样即使 daemon 反复重启，UCS 也会跳过（因为 lastgen 已经写了）。
   echo "trigger $(date) now=$N sched=$S" >> "$LOG"
+  # debug: test if mobile can read lastgen
+  echo "debug: root read lastgen=[$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)]" >> "$LOG"
+  /usr/bin/su mobile -c 'echo "debug: mobile read lastgen=[$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)]"' >> "$LOG" 2>&1
   /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
   CLI_PID=$!
   echo "spawned cli pid=$CLI_PID" >> "$LOG"
