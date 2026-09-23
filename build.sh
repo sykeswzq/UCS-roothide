@@ -189,7 +189,14 @@ while true; do
   # v1.0.21: 直接跑 UCS --cli，不走 UIApplicationMain，不闪 Launch Screen。
   # --cli 已实测 HealthKit + 微信同步完全工作（v1.0.21 SSH 测试通过）。
   echo "trigger $(date) now=$N sched=$S last=$LAST" >> "$LOG"
-  nohup /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
+  # 先写 lastgen 防止重复触发（UCS 内部也写，但这里先写一道兜底）
+  echo "$TODAY" > /rootfs/private/var/mobile/Documents/ucs_lastgen.txt
+  echo "$TODAY" > /var/mobile/Documents/ucs_lastgen.txt
+  chmod 666 /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null
+  chmod 666 /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null
+  /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
+  CLI_PID=$!
+  echo "spawned cli pid=$CLI_PID" >> "$LOG"
   sleep 60
 done
 SCREOF
