@@ -181,24 +181,13 @@ while true; do
   S=$((SH*60+SM))
   # 未到点则等待
   if [ "$N" -lt "$S" ]; then sleep 30; continue; fi
-  # 今天已生成则跳过（双路读取 lastgen，跨天自动重置）
-  TODAY=$(date +%Y-%m-%d)
-  LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
-  [ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
-  echo "check $(date) today=$TODAY last=[$LAST]" >> "$LOG"
-  if [ "$LAST" = "$TODAY" ]; then sleep 30; continue; fi
-  # v1.0.21: 直接跑 UCS --cli，不走 UIApplicationMain，不闪 Launch Screen。
-  # --cli 已实测 HealthKit + 微信同步完全工作（v1.0.21 SSH 测试通过）。
-  echo "trigger $(date) now=$N sched=$S last=$LAST" >> "$LOG"
-  # 先写 lastgen 防止重复触发（UCS 内部也写，但这里先写一道兜底）
-  echo "$TODAY" > /rootfs/private/var/mobile/Documents/ucs_lastgen.txt
-  echo "$TODAY" > /var/mobile/Documents/ucs_lastgen.txt
-  chmod 666 /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null
-  chmod 666 /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null
+  # 脚本不检查 lastgen，只到点跑 UCS。UCS 内部自己判断是否已生成。
+  # 这样即使 daemon 反复重启，UCS 也会跳过（因为 lastgen 已经写了）。
+  echo "trigger $(date) now=$N sched=$S" >> "$LOG"
   /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
   CLI_PID=$!
   echo "spawned cli pid=$CLI_PID" >> "$LOG"
-  sleep 60
+  sleep 300
 done
 SCREOF
 chmod 755 "$SCRIPT"
