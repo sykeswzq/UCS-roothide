@@ -827,10 +827,12 @@ static NSDictionary *UCSDefaultConfig(void) {
             return;
         }
         NSString *today = [UCSHealth todayString];
-        NSString *last = [NSString stringWithContentsOfFile:UCS_LASTGEN encoding:NSUTF8StringEncoding error:nil];
+        // v1.0.22：优先读 ALT 路径（App 实际写入的位置），再读原路径
+        NSString *last = [NSString stringWithContentsOfFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" encoding:NSUTF8StringEncoding error:nil];
         if (![last isEqualToString:today]) {
-            last = [NSString stringWithContentsOfFile:@"/rootfs/private/var/mobile/Documents/ucs_lastgen.txt" encoding:NSUTF8StringEncoding error:nil];
+            last = [NSString stringWithContentsOfFile:UCS_LASTGEN encoding:NSUTF8StringEncoding error:nil];
         }
+        ULog(@"auto check: today=%@ last=%@", today, last);
         if ([last isEqualToString:today]) {
             ULog(@"auto skip: already generated today");
             return;
