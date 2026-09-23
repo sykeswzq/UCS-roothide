@@ -185,6 +185,7 @@ while true; do
   TODAY=$(date +%Y-%m-%d)
   LAST=$(cat /rootfs/private/var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
   [ -z "$LAST" ] && LAST=$(cat /var/mobile/Documents/ucs_lastgen.txt 2>/dev/null)
+  echo "check $(date) today=$TODAY last=[$LAST]" >> "$LOG"
   if [ "$LAST" = "$TODAY" ]; then sleep 30; continue; fi
   # v1.0.21: 直接跑 UCS --cli，不走 UIApplicationMain，不闪 Launch Screen。
   # --cli 已实测 HealthKit + 微信同步完全工作（v1.0.21 SSH 测试通过）。
