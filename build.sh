@@ -116,7 +116,7 @@ Installed-Size: 2048
 Depends: firmware (>= 15.0)
 Maintainer: sykeswzq
 Author: sykeswzq
-Description: UCS 运动数据生成工具：手动/定时自动生成健康与微信步数，单 DEB 安装即用
+Description: UCS v2.0.0 运动数据生成工具：手动/定时自动生成健康、微信、支付宝步数，单 DEB 安装即用，支持 roothide
 Section: Utilities
 Priority: optional
 EOF
