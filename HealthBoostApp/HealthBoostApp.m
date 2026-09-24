@@ -755,8 +755,10 @@ static NSDictionary *UCSDefaultConfig(void) {
     self.busy = YES;
     [self updateStatus:[NSString stringWithFormat:@"正在生成：%ld 步 / %.0f 米 / %ld 层...", (long)steps, dist, (long)flights]];
 
+    ULog(@"manual generate: steps=%ld dist=%.0f flights=%ld", (long)steps, dist, (long)flights);
     __weak typeof(self) ws = self;
     [self.health generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
+        ULog(@"manual generate result ok=%d", ok);
         NSString *today = [UCSHealth todayString];
         // lastgen 双视图写入（App 沙盒视图 + 真实视图）
         [today writeToFile:UCS_LASTGEN atomically:YES encoding:NSUTF8StringEncoding error:nil];
