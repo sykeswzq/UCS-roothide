@@ -7,7 +7,7 @@
 #   4) App 单 arm64e；StepFaker 必须 fat(arm64+arm64e)，微信主进程是 arm64 才会选 arm64 slice 加载
 set -eu
 
-VER=1.0.22
+VER=2.0.0
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -99,12 +99,12 @@ echo "  tweak signed OK (magic=$smagic FAT arm64+arm64e, $(wc -c < tweak_staging
 echo "[4/5] Merge tweak + control + postinst"
 cp -R tweak_staging/Library staging/
 
-# v1.0.22: copy StepCount.dylib (Alipay step sim)
+# v2.0.0: copy StepCount.dylib (Alipay step sim)
 cp tweak/StepCount.dylib staging/Library/MobileSubstrate/DynamicLibraries/
 cp tweak/StepCount.plist staging/Library/MobileSubstrate/DynamicLibraries/
 chmod 755 staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib
 chmod 644 staging/Library/MobileSubstrate/DynamicLibraries/StepCount.plist
-# v1.0.22: do NOT ldid -S StepCount.dylib, it breaks injection (original deb works without signing)
+# v2.0.0: do NOT ldid -S StepCount.dylib, it breaks injection (original deb works without signing)
 echo "  StepCount.dylib: $(wc -c < staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib) bytes"
 
 cat > staging/DEBIAN/control << EOF
@@ -167,6 +167,27 @@ cat > "$SCRIPT" << 'SCREOF'
 LOG=/var/mobile/Documents/ucs_launchd.log
 echo "=== ucs_schedule daemon started pid=$$ uid=$(id -u) $(date) ===" >> "$LOG"
 while true; do
+  # v2.0.0: check alipay steps file
+  ALIPAY_FILE=""
+  for f in /rootfs/private/var/mobile/Documents/ucs_alipay_steps.txt /var/mobile/Documents/ucs_alipay_steps.txt; do
+    [ -f "$f" ] && ALIPAY_FILE="$f" && break
+  done
+  if [ -f "$ALIPAY_FILE" ]; then
+    STEPS=$(cat "$ALIPAY_FILE")
+    rm -f "$ALIPAY_FILE"
+    for p in /var/mobile/Containers/Data/Application/*/Library/Preferences/com.alipay.iphoneclient.plist; do
+      [ -f "$p" ] || continue
+      plutil -key ssm_step_sim_max -value $STEPS -type int "$p" >> "$LOG" 2>&1
+      plutil -key ssm_step_sim_min -value $STEPS -type int "$p" >> "$LOG" 2>&1
+      plutil -key ssm_step_sim_enabled -value YES -type bool "$p" >> "$LOG" 2>&1
+      plutil -key ssm_enabled -value YES -type bool "$p" >> "$LOG" 2>&1
+      plutil -key ssm_enableStepSim -value YES -type bool "$p" >> "$LOG" 2>&1
+      plutil -key ssm_step_sim_mode -value 0 -type int "$p" >> "$LOG" 2>&1
+      echo "alipay written: $p steps=$STEPS" >> "$LOG"
+    done
+    killall -9 cfprefsd >> "$LOG" 2>&1
+    killall -9 AlipayWallet >> "$LOG" 2>&1
+  fi
   # 配置双路读取：App（mobile 沙盒）实际写入的物理位置是 /rootfs/private/var/mobile/Documents/，
   # postinst 默认写 /var/mobile/Documents/；两个视图 inode 不同，必须都尝试
   CFG=""
@@ -197,7 +218,7 @@ while true; do
   /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
   CLI_PID=$!
   echo "spawned cli pid=$CLI_PID" >> "$LOG"
-  sleep 300
+  sleep 30
 done
 SCREOF
 chmod 755 "$SCRIPT"
