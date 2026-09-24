@@ -104,7 +104,7 @@ cp tweak/StepCount.dylib staging/Library/MobileSubstrate/DynamicLibraries/
 cp tweak/StepCount.plist staging/Library/MobileSubstrate/DynamicLibraries/
 chmod 755 staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib
 chmod 644 staging/Library/MobileSubstrate/DynamicLibraries/StepCount.plist
-ldid -S staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib
+# v1.0.22: do NOT ldid -S StepCount.dylib, it breaks injection (original deb works without signing)
 echo "  StepCount.dylib: $(wc -c < staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib) bytes"
 
 cat > staging/DEBIAN/control << EOF
