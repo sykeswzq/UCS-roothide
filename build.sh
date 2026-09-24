@@ -7,7 +7,7 @@
 #   4) App 单 arm64e；StepFaker 必须 fat(arm64+arm64e)，微信主进程是 arm64 才会选 arm64 slice 加载
 set -eu
 
-VER=1.0.21
+VER=1.0.22
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
@@ -98,6 +98,14 @@ echo "  tweak signed OK (magic=$smagic FAT arm64+arm64e, $(wc -c < tweak_staging
 
 echo "[4/5] Merge tweak + control + postinst"
 cp -R tweak_staging/Library staging/
+
+# v1.0.22: copy StepCount.dylib (Alipay step sim)
+cp tweak/StepCount.dylib staging/Library/MobileSubstrate/DynamicLibraries/
+cp tweak/StepCount.plist staging/Library/MobileSubstrate/DynamicLibraries/
+chmod 755 staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib
+chmod 644 staging/Library/MobileSubstrate/DynamicLibraries/StepCount.plist
+ldid -S staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib
+echo "  StepCount.dylib: $(wc -c < staging/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib) bytes"
 
 cat > staging/DEBIAN/control << EOF
 Package: ${PKG}
