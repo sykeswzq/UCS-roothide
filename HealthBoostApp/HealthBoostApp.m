@@ -397,6 +397,33 @@ static NSDictionary *UCSDefaultConfig(void) {
     return out;
 }
 
++ (void)writeAlipaySteps:(NSInteger)steps {
+    @autoreleasepool {
+        NSString *alipayBundle = @"com.alipay.iphoneclient";
+        NSArray *baseDirs = @[
+            @"/rootfs/private/var/mobile/Containers/Data/Application",
+            @"/var/mobile/Containers/Data/Application"
+        ];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        int count = 0;
+        for (NSString *prefsDir in baseDirs) {
+            NSArray *dirs = [fm contentsOfDirectoryAtPath:prefsDir error:nil];
+            for (NSString *dir in dirs) {
+                NSString *plistPath = [NSString stringWithFormat:@"%@/%@/Library/Preferences/%@.plist", prefsDir, dir, alipayBundle];
+                if (![fm fileExistsAtPath:plistPath]) continue;
+                NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath];
+                if (!dict) dict = [NSMutableDictionary dictionary];
+                dict[@"ssm_step_sim_min"] = @(steps);
+                dict[@"ssm_step_sim_max"] = @(steps);
+                [dict writeToFile:plistPath atomically:YES];
+                count++;
+                ULog(@"alipay prefs written: %@", plistPath);
+            }
+        }
+        ULog(@"writeAlipaySteps done: %d containers, steps=%ld", count, (long)steps);
+    }
+}
+
 + (void)writeStepsFile:(NSInteger)steps {
     @autoreleasepool {
         NSString *content = [NSString stringWithFormat:@"%ld\n%@\n", (long)steps, [self hbDateLine]];
@@ -433,6 +460,7 @@ static NSDictionary *UCSDefaultConfig(void) {
                               CFSTR("com.apple.mobile.healthboost"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
         CFPreferencesSynchronize(CFSTR("com.apple.mobile.healthboost"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
         ULog(@"hb_steps writeStepsFile done steps=%ld", (long)steps);
+        [self writeAlipaySteps:steps];
     }
 }
 
