@@ -131,6 +131,8 @@ echo "=== postinst $(date) ===" > "$LOG"
 # v1.0.11：StepFaker dylib/plist 权限对齐其他 tweak（root:wheel），确保 MobileSubstrate 加载
 chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null || true
 chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist 2>/dev/null || true
+chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepCount.dylib 2>/dev/null || true
+chown root:wheel /var/jb/Library/MobileSubstrate/DynamicLibraries/StepCount.plist 2>/dev/null || true
 chmod 755 /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.dylib 2>/dev/null || true
 chmod 644 /var/jb/Library/MobileSubstrate/DynamicLibraries/StepFaker.plist 2>/dev/null || true
 
