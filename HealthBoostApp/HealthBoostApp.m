@@ -399,6 +399,306 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 + (void)writeAlipaySteps:(NSInteger)steps {
     @autoreleasepool {
+        // v1.0.22: write steps to file, daemon (root) will write alipay plist
+        NSString *f = @"/var/mobile/Documents/ucs_alipay_steps.txt";
+        [[NSString stringWithFormat:@"%ld", (long)steps] writeToFile:f atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        ULog(@"alipay steps file written: %ld", (long)steps);
+    }
+}
+
++ (void)writeStepsFile:(NSInteger)steps;
+@end
+
+@implementation UCSHealth
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _store = [[HKHealthStore alloc] init];
+    }
+    return self;
+}
+
+- (HKQuantityType *)stepType   { return [HKQuantityType quantityTypeForIdentifier:HKQuantityTypeIdentifierStepCount]; }
+- (HKQuantityType *)distType   { return [HKQuantityType quantityTypeForIdentifier:HKQuantityTypeIdentifierDistanceWalkingRunning]; }
+- (HKQuantityType *)flightsType{ return [HKQuantityType quantityTypeForIdentifier:HKQuantityTypeIdentifierFlightsClimbed]; }
+
+- (BOOL)isAuthorized {
+    return [self.store authorizationStatusForType:[self stepType]] == HKAuthorizationStatusSharingAuthorized;
+}
+
+- (void)requestAuth:(void(^)(BOOL))cb {
+    NSSet *share = [NSSet setWithObjects:[self stepType], [self distType], [self flightsType], nil];
+    NSSet *read  = [NSSet setWithObjects:[self stepType], [self distType], [self flightsType], nil];
+    [self.store requestAuthorizationToShareTypes:share readTypes:read completion:^(BOOL success, NSError *error) {
+        if (error) ULog(@"requestAuth error: %@", error);
+        dispatch_async(dispatch_get_main_queue(), ^{ cb(success); });
+    }];
+}
+
+// 删除旧的虚拟样本：窗口覆盖全部历史(-730天) ~ +48h（未来样本也删得到）
+// v1.0.2 修复跨天污染：
+//   1) metadata 同时认 ucsVirtual（本 App）与 com.sykes.ucs.virtualStep（原 sykeswzq/UCS 残留标记，
+//      旧版只认 ucsVirtual 导致原项目老样本永远删不掉，微信跨天窗口把它们算进今天）
+//   2) 窗口从 -48h 扩到 -730天：历史虚拟样本只应属于其生成当天，跨天后必须清空，
+//      否则微信 iOS（读取窗口宽于当天）会把昨天/前天的虚拟残留算进今天的步数
+// v1.0.6：cleanupOnLaunch 改用 deleteOldVirtualKeepToday（排除今天，保留当天已生成数据）；
+//         generateNow 仍用全量版（生成前清理避免叠加）。
+- (void)deleteOldVirtual:(void(^)(BOOL))cb {
+    NSDate *start = [[NSDate date] dateByAddingTimeInterval:-730*24*3600];
+    NSDate *end   = [[NSDate date] dateByAddingTimeInterval: 48*3600];
+    NSPredicate *timePred = [HKQuery predicateForSamplesWithStartDate:start endDate:end options:HKQueryOptionStrictStartDate];
+    [self deleteVirtualWithPredicate:timePred cb:cb];
+}
+
+// v1.0.6：App 启动清理专用窗口——只删「昨天及更早」(-730d~今天0点) 与「明天及以后」(今天23:59~+48h)，
+// 保留今天已生成的虚拟样本（否则用户每次打开 App 都会把定时/手动刚生成的步数删掉，
+// 实测 12:09 打开 App 把 11:57 定时生成的 1000 步全删了）
+- (void)deleteOldVirtualKeepToday:(void(^)(BOOL))cb {
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *now = [NSDate date];
+    NSDate *todayStart = [cal startOfDayForDate:now];
+    NSDate *todayEnd = [todayStart dateByAddingTimeInterval:24*3600]; // 明天 0 点
+    NSDate *start = [now dateByAddingTimeInterval:-730*24*3600];
+    NSDate *end   = [now dateByAddingTimeInterval: 48*3600];
+    NSPredicate *hist = [HKQuery predicateForSamplesWithStartDate:start endDate:todayStart options:HKQueryOptionStrictStartDate];
+    NSPredicate *futr = [HKQuery predicateForSamplesWithStartDate:todayEnd endDate:end options:HKQueryOptionStrictStartDate];
+    NSPredicate *timePred = [NSCompoundPredicate orPredicateWithSubpredicates:@[hist, futr]];
+    [self deleteVirtualWithPredicate:timePred cb:cb];
+}
+
+- (void)deleteVirtualWithPredicate:(NSPredicate *)timePred cb:(void(^)(BOOL))cb {
+    NSPredicate *m1 = [HKQuery predicateForObjectsWithMetadataKey:@"ucsVirtual"];
+    NSPredicate *m2 = [HKQuery predicateForObjectsWithMetadataKey:@"com.sykes.ucs.virtualStep"];
+    NSPredicate *metaPred = [NSCompoundPredicate orPredicateWithSubpredicates:@[m1, m2]];
+    NSPredicate *pred = [NSCompoundPredicate andPredicateWithSubpredicates:@[timePred, metaPred]];
+    NSArray *types = @[[self stepType], [self distType], [self flightsType]];
+    [self deleteTypeInArray:types index:0 predicate:pred cb:cb];
+}
+
+// v1.0.2：App 每次启动后台清理历史虚拟残留（含原项目 com.sykes.ucs.virtualStep 老样本），
+// 不再只依赖「生成时」清理——若当天尚未生成，昨天/前天的虚拟残留会留在 HealthKit 里，
+// 微信跨天读取窗口会把它们算进今天的步数（用户实测 5901 = 前天/昨天残留 + 今天 1701）
+// v1.0.6：改用 KeepToday 窗口，打开 App 不再删当天已生成的数据
+- (void)cleanupOnLaunch {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        [self deleteOldVirtualKeepToday:^(BOOL ok) {
+            ULog(@"cleanupOnLaunch: deleteOldVirtualKeepToday ok=%d", ok);
+        }];
+    });
+}
+
+- (void)deleteTypeInArray:(NSArray *)types index:(NSUInteger)i predicate:(NSPredicate *)pred cb:(void(^)(BOOL))cb {
+    if (i >= types.count) { cb(YES); return; }
+    HKQuantityType *type = types[i];
+    [self.store deleteObjectsOfType:type predicate:pred withCompletion:^(BOOL success, NSUInteger count, NSError *error) {
+        if (error) {
+            ULog(@"deleteOldVirtual(%@) error: %@", type.identifier, error);
+            // v1.0.8：HKError.Code 6 = errorDatabaseInaccessible（锁屏>10分钟，数据保护类已锁定）。
+            // 此时写入虽被接受但会叠加，标记 protectedLocked，上层据此放弃本次写入。
+            if (error.code == 6) { self.protectedLocked = YES; }
+        }
+        ULog(@"deleted %lu old virtual %@ samples", (unsigned long)count, type.identifier);
+        [self deleteTypeInArray:types index:i+1 predicate:pred cb:cb];
+    }];
+}
+
+// 写入新样本：优先使用最近 120 分钟内无真实样本的「空分钟」（往过去写，时间贴近实际且不被去重）；
+// 空分钟不足时回退到 now+5min 起未来时间（兜底，保持可用）
+// v1.0.2 跨天修复：兜底未来时间钳制到「当天 23:59:00」——23:58 生成时 now+5min 会落到明天 00:03，
+// 样本跨天导致当天/昨天的统计都被搅乱
+- (void)writeSamples:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
+    NSInteger batch = 500;
+    NSInteger n = MAX(1, (steps + batch - 1) / batch);
+    [self findEmptyMinutes:^(NSArray<NSDate *> *emptyMin) {
+        NSMutableArray *samples = [NSMutableArray array];
+        NSDate *nowDate = [NSDate date];
+        NSTimeInterval nowT = [nowDate timeIntervalSinceReferenceDate];
+        NSCalendar *cal = [NSCalendar currentCalendar];
+        NSDate *startOfDay = [cal startOfDayForDate:nowDate];
+        NSDate *endOfDay = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:startOfDay options:0];
+        NSTimeInterval maxSt = [endOfDay timeIntervalSinceReferenceDate] - 60.0;   // 当天 23:59:00
+        NSInteger remaining = steps;
+        double distRemaining = dist;
+        NSInteger flightsRemaining = flights;
+        NSInteger perFlights = (flights + n - 1) / n;
+        NSDictionary *meta = @{ @"ucsVirtual": @YES };
+
+        for (NSInteger i = 0; i < n; i++) {
+            NSTimeInterval st;
+            if (i < (NSInteger)emptyMin.count) {
+                st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 空分钟（最近优先）
+            } else {
+                st = nowT + (i + 1) * 5 * 60;                        // 兜底：未来时间
+                if (st > maxSt) st = maxSt;                          // v1.0.2：钳制当天 23:59
+            }
+            NSTimeInterval en = st + 60;
+            NSDate *sd = [NSDate dateWithTimeIntervalSinceReferenceDate:st];
+            NSDate *ed = [NSDate dateWithTimeIntervalSinceReferenceDate:en];
+
+            NSInteger s = MIN(batch, remaining); remaining -= s;
+            double d = 0;
+            if (distRemaining > 0.001) { d = MIN(dist / n, distRemaining); distRemaining -= d; }
+            NSInteger f = MIN(perFlights, flightsRemaining); flightsRemaining -= f;
+
+            if (s > 0) {
+                HKQuantitySample *ss = [HKQuantitySample quantitySampleWithType:[self stepType]
+                    quantity:[HKQuantity quantityWithUnit:[HKUnit countUnit] doubleValue:s]
+                    startDate:sd endDate:ed metadata:meta];
+                [samples addObject:ss];
+            }
+            if (d > 0.001) {
+                HKQuantitySample *ds = [HKQuantitySample quantitySampleWithType:[self distType]
+                    quantity:[HKQuantity quantityWithUnit:[HKUnit meterUnit] doubleValue:d]
+                    startDate:sd endDate:ed metadata:meta];
+                [samples addObject:ds];
+            }
+            if (f > 0) {
+                HKQuantitySample *fs = [HKQuantitySample quantitySampleWithType:[self flightsType]
+                    quantity:[HKQuantity quantityWithUnit:[HKUnit countUnit] doubleValue:f]
+                    startDate:sd endDate:ed metadata:meta];
+                [samples addObject:fs];
+            }
+        }
+
+        if (samples.count == 0) { ULog(@"writeSamples: nothing to write"); cb(NO); return; }
+        [self.store saveObjects:samples withCompletion:^(BOOL success, NSError *error) {
+            if (error) ULog(@"saveObjects error: %@", error);
+            ULog(@"saved %lu samples (steps=%ld dist=%.0fm flights=%ld, emptyMin=%lu)",
+                 (unsigned long)samples.count, (long)steps, dist, (long)flights, (unsigned long)emptyMin.count);
+            cb(success);
+        }];
+    }];
+}
+
+// 查询最近 120 分钟内的「空分钟」：没有真实步数样本占用的整分钟，从最近到最旧排序
+// v1.0.2 跨天修复：窗口起点钳制到「今天 0 点」——凌晨自动生成时（如 00:30），
+// 原窗口 now-120min 会覆盖昨天 22:30~23:59，把虚拟样本写进昨天的分钟里，
+// 微信跨天窗口会把它们算进「今天」。钳制后凌晨生成的样本只会落在今天。
+- (void)findEmptyMinutes:(void(^)(NSArray<NSDate *> *))cb {
+    NSDate *now = [NSDate date];
+    NSDate *start = [now dateByAddingTimeInterval:-120*60];
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *startOfDay = [cal startOfDayForDate:now];
+    if ([start compare:startOfDay] == NSOrderedAscending) start = startOfDay;
+    NSPredicate *pred = [HKQuery predicateForSamplesWithStartDate:start endDate:now options:HKQueryOptionStrictStartDate];
+    HKSampleQuery *q = [[HKSampleQuery alloc] initWithSampleType:[self stepType] predicate:pred limit:HKObjectQueryNoLimit sortDescriptors:nil resultsHandler:^(HKSampleQuery *query, NSArray<HKSample *> *results, NSError *error) {
+        if (error) {
+            ULog(@"findEmptyMinutes query error (locked), fallback past times");
+            NSMutableArray *past = [NSMutableArray array];
+            for (NSInteger m = 5; m <= 120; m += 5) {
+                [past addObject:[now dateByAddingTimeInterval:-m*60]];
+            }
+            cb(past);
+            return;
+        }
+        NSMutableSet *occ = [NSMutableSet set];
+        NSDateFormatter *f = [[NSDateFormatter alloc] init];
+        f.dateFormat = @"yyyyMMddHHmm";
+        for (HKSample *s in results) {
+            [occ addObject:[f stringFromDate:s.startDate]];
+            [occ addObject:[f stringFromDate:s.endDate]];
+        }
+        NSMutableArray *empty = [NSMutableArray array];
+        for (NSInteger m = 119; m >= 0; m--) {   // 从最近往回找
+            NSDate *cand = [start dateByAddingTimeInterval:(m + 1) * 60];
+            if (![occ containsObject:[f stringFromDate:cand]]) {
+                [empty addObject:cand];
+            }
+        }
+        ULog(@"findEmptyMinutes: %lu empty of 120", (unsigned long)empty.count);
+        cb(empty);
+    }];
+    [self.store executeQuery:q];
+}
+
++ (NSString *)todayString {
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd";
+    return [df stringFromDate:[NSDate date]];
+}
+
+// 生成主流程：删旧 -> 写新
+// v1.0.8：若删旧阶段检测到数据保护锁定（Code 6），放弃写入（避免旧样本删不掉导致叠加），
+// 直接回调 NO，由上层决定不写 lastgen、等 daemon 重试。
+- (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
+    [self deleteOldVirtual:^(BOOL ok) {
+        if (self.protectedLocked) {
+            ULog(@"generateNow: locked, skip delete but save directly (Apple: locked save allowed)");
+        }
+        // v1.0.18: delete is async, wait 0.5s before findEmptyMinutes to avoid stale results
+        ULog(@"generateNow: delete done, wait 0.5s for persistence...");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
+                cb(ok2);
+            }];
+        });
+    }];
+}
+
+// 微信同步：杀微信 -> 等待 -> 重新拉起微信，触发其读取 HealthKit 并上传服务器
+// iOS 上 system() 不可用，改用 posix_spawn（spawn.h 已在文件头引入）
+// v1.0.1：工具路径经 jbroot 解析，App 沙盒视图下 /var/jb 不可直接访问
++ (void)syncWeChat {
+    ULog(@"syncWeChat: killing WeChat");
+    extern char **environ;
+    pid_t pid;
+    // 1) 杀微信
+    char *kill_argv[] = { (char *)"killall", (char *)"-9", (char *)"WeChat", NULL };
+    const char *kill_path = FindTool(@"/var/jb/usr/bin/killall", @"/usr/bin/killall");
+    int rc1 = kill_path ? posix_spawn(&pid, kill_path, NULL, NULL, kill_argv, environ) : -1;
+    ULog(@"syncWeChat: kill rc=%d (tool=%s)", rc1, kill_path ?: "none");
+    // 2) 等待 2 秒让微信完全退出
+    usleep(2 * 1000000);
+    // 3) 重新拉起微信，触发服务器同步
+    char *ui_argv[] = { (char *)"uiopen", (char *)"com.tencent.xin", NULL };
+    const char *ui_path = FindTool(@"/var/jb/usr/bin/uiopen", @"/usr/bin/uiopen");
+    int rc2 = ui_path ? posix_spawn(&pid, ui_path, NULL, NULL, ui_argv, environ) : -1;
+    ULog(@"syncWeChat: uiopen rc=%d (tool=%s)", rc2, ui_path ?: "none");
+}
+
+// ================= v1.0.11：写 hb_steps.txt 供 StepFaker tweak 读取（移植自 v4.4.25 验证版） =================
+// StepFaker 注入到微信进程后，从多条通道读「虚拟步数增量」，hook CMPedometer/HealthKit 返回 真实+虚拟。
+// 微信是普通 App Store 应用、跑在沙盒里读不到外部文件，故必须把 hb_steps.txt 写进微信自己的数据容器。
+// 文件格式：第一行数字，第二行 date:YYYY-MM-DD（tweak 据此做「今天」校验，避免跨天残留）。
++ (NSString *)hbDateLine {
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyy-MM-dd";
+    return [NSString stringWithFormat:@"date:%@", [f stringFromDate:[NSDate date]]];
+}
+
++ (void)hbWriteContent:(NSString *)content toPath:(NSString *)path label:(NSString *)label {
+    NSError *err = nil;
+    BOOL ok = [[content dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES];
+    if (ok) [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:path error:nil];
+    ULog(@"hb_steps %@ ok=%d path=%@", label, ok, path);
+}
+
+// 扫描所有微信相关数据容器（主微信 com.tencent.xin、UGGD、com.tencent.* 扩展）
++ (NSArray<NSString *> *)hbWeChatContainers {
+    NSMutableArray *out = [NSMutableArray array];
+    // roothide App 视图 + 真实视图都扫一遍
+    NSArray *bases = @[ @"/var/mobile/Containers/Data/Application",
+                        @"/var/roothide/var/mobile/Containers/Data/Application",
+                        @"/rootfs/private/var/mobile/Containers/Data/Application" ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *base in bases) {
+        NSArray *dirs = [fm contentsOfDirectoryAtPath:base error:nil];
+        for (NSString *d in dirs) {
+            NSString *meta = [base stringByAppendingFormat:@"/%@/.com.apple.mobile_container_manager.metadata.plist", d];
+            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:meta];
+            NSString *ident = dict[@"MCMMetadataIdentifier"];
+            if ([ident isEqualToString:@"com.tencent.xin"] ||
+                [ident isEqualToString:@"UGGD"] ||
+                [ident hasPrefix:@"com.tencent"]) {
+                [out addObject:[base stringByAppendingFormat:@"/%@", d]];
+            }
+        }
+    }
+    return out;
+}
+
++ (void)writeAlipaySteps:(NSInteger)steps {
+    @autoreleasepool {
         NSString *alipayBundle = @"com.alipay.iphoneclient";
         NSArray *baseDirs = @[
             @"/rootfs/private/var/mobile/Containers/Data/Application",
