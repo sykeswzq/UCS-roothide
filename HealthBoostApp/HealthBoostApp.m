@@ -781,7 +781,7 @@ static NSDictionary *UCSDefaultConfig(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             ws.busy = NO;
             [ws updateStatus:ok
-                ? [NSString stringWithFormat:@"生成成功：%ld 步 / %.0f 米 / %ld 层\n已写入健康，微信运动已重新拉起同步。", (long)steps, dist, (long)flights]
+                ? [NSString stringWithFormat:@"生成成功：%ld 步 / %.0f 米 / %ld 层\n已写入健康，微信/支付宝运动已同步。", (long)steps, dist, (long)flights]
                 : @"生成失败，请查看日志 /var/mobile/Documents/ucs.log"];
             [ws.tableView reloadData];
         });
