@@ -225,10 +225,10 @@ chmod 755 "$SCRIPT"
 chown mobile:mobile "$SCRIPT" 2>/dev/null || true
 echo "script written: $(wc -l < "$SCRIPT") lines" >> "$LOG"
 
-# LaunchAgent：双写 /var/mobile/Library/LaunchAgents/（root 视图，launchd 读）
-# 与 /rootfs/private/var/mobile/Library/LaunchAgents/（App 沙盒视图，App 兜底检查）
+# LaunchAgent：双写 /Library/LaunchDaemons/（root 视图，launchd 读）
+# 与 /rootfs/private/Library/LaunchDaemons/（App 沙盒视图，App 兜底检查）
 mkdir -p /var/mobile/Library/LaunchAgents
-PLIST=/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
+PLIST=/Library/LaunchDaemons/com.sykes.ucs.schedule.plist
 cat > "$PLIST" << 'PLEOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -256,14 +256,14 @@ chmod 644 "$PLIST"
 chown mobile:mobile "$PLIST" 2>/dev/null || true
 # 同步到 App 沙盒视图（postinst 以 root 运行可写）
 mkdir -p /rootfs/private/var/mobile/Library/LaunchAgents 2>/dev/null || true
-cp "$PLIST" /rootfs/private/var/mobile/Library/LaunchAgents/ 2>/dev/null || true
-chmod 644 /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
-chown mobile:mobile /rootfs/private/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist 2>/dev/null || true
+cp "$PLIST" /rootfs/private/Library/LaunchDaemons/ 2>/dev/null || true
+chmod 644 /rootfs/private/Library/LaunchDaemons/com.sykes.ucs.schedule.plist 2>/dev/null || true
+chown mobile:mobile /rootfs/private/Library/LaunchDaemons/com.sykes.ucs.schedule.plist 2>/dev/null || true
 
 # 注册（roothide 域：user/foreground）。v1.0.4 前用 asuser 501 bootstrap 实测挂不实
 # （rc=0 但 launchctl print 找不到实例）；root 直连 bootstrap 实测可行（state=running）。
-launchctl bootout user/foreground/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
-launchctl bootstrap user/foreground /var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist >> "$LOG" 2>&1 || true
+launchctl bootout system/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
+launchctl bootstrap system /Library/LaunchDaemons/com.sykes.ucs.schedule.plist >> "$LOG" 2>&1 || true
 echo "launchd bootstrap (root direct) rc=$?" >> "$LOG"
 
 # 刷新图标缓存
