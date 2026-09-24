@@ -399,28 +399,13 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 + (void)writeAlipaySteps:(NSInteger)steps {
     @autoreleasepool {
-        NSString *alipayBundle = @"com.alipay.iphoneclient";
-        NSArray *baseDirs = @[
-            @"/rootfs/private/var/mobile/Containers/Data/Application",
-            @"/var/mobile/Containers/Data/Application"
-        ];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        int count = 0;
-        for (NSString *prefsDir in baseDirs) {
-            NSArray *dirs = [fm contentsOfDirectoryAtPath:prefsDir error:nil];
-            for (NSString *dir in dirs) {
-                NSString *plistPath = [NSString stringWithFormat:@"%@/%@/Library/Preferences/%@.plist", prefsDir, dir, alipayBundle];
-                if (![fm fileExistsAtPath:plistPath]) continue;
-                NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath];
-                if (!dict) dict = [NSMutableDictionary dictionary];
-                dict[@"ssm_step_sim_min"] = @(steps);
-                dict[@"ssm_step_sim_max"] = @(steps);
-                [dict writeToFile:plistPath atomically:YES];
-                count++;
-                ULog(@"alipay prefs written: %@", plistPath);
-            }
-        }
-        ULog(@"writeAlipaySteps done: %d containers, steps=%ld", count, (long)steps);
+        // v1.0.22: use CFPreferences to write alipay step sim
+        CFPreferencesSetValue(CFSTR("ssm_step_sim_min"), (__bridge CFNumberRef)@(steps),
+                              CFSTR("com.alipay.iphoneclient"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+        CFPreferencesSetValue(CFSTR("ssm_step_sim_max"), (__bridge CFNumberRef)@(steps),
+                              CFSTR("com.alipay.iphoneclient"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+        CFPreferencesSynchronize(CFSTR("com.alipay.iphoneclient"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+        ULog(@"alipay CFPreferences written: %ld", (long)steps);
     }
 }
 
