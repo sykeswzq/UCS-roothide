@@ -399,13 +399,10 @@ static NSDictionary *UCSDefaultConfig(void) {
 
 + (void)writeAlipaySteps:(NSInteger)steps {
     @autoreleasepool {
-        // v1.0.22: use CFPreferences to write alipay step sim
-        CFPreferencesSetValue(CFSTR("ssm_step_sim_min"), (__bridge CFNumberRef)@(steps),
-                              CFSTR("com.alipay.iphoneclient"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
-        CFPreferencesSetValue(CFSTR("ssm_step_sim_max"), (__bridge CFNumberRef)@(steps),
-                              CFSTR("com.alipay.iphoneclient"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
-        CFPreferencesSynchronize(CFSTR("com.alipay.iphoneclient"), kCFPreferencesAnyUser, kCFPreferencesAnyHost);
-        ULog(@"alipay CFPreferences written: %ld", (long)steps);
+        // v1.0.22: write steps to file, daemon (root) will write alipay plist with plutil
+        NSString *f = @"/var/mobile/Documents/ucs_alipay_steps.txt";
+        [[NSString stringWithFormat:@"%ld", (long)steps] writeToFile:f atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        ULog(@"alipay steps file written: %ld", (long)steps);
     }
 }
 
