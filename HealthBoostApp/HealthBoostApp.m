@@ -211,33 +211,32 @@ static NSDictionary *UCSDefaultConfig(void) {
     NSInteger n = MAX(1, (steps + batch - 1) / batch);
     [self findEmptyMinutes:^(NSArray<NSDate *> *emptyMin) {
         NSMutableArray *samples = [NSMutableArray array];
-        NSDate *nowDate = [NSDate date];
-        NSTimeInterval nowT = [nowDate timeIntervalSinceReferenceDate];
         NSCalendar *cal = [NSCalendar currentCalendar];
+        NSDate *nowDate = [NSDate date];
         NSDate *startOfDay = [cal startOfDayForDate:nowDate];
-        NSDate *endOfDay = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:startOfDay options:0];
-        NSTimeInterval maxSt = [endOfDay timeIntervalSinceReferenceDate] - 60.0;   // 当天 23:59:00
+        // v2.1.1：空分钟不够时不用未来时间兜底，减少批次，每个批次写更多步数
+        // 避免未来时间和之前写的样本重叠被去重
+        if ((NSInteger)emptyMin.count < n) {
+            n = MAX(1, (NSInteger)emptyMin.count);
+            ULog(@"writeSamples: emptyMin=%ld < required n, reduced to %d batches", (long)emptyMin.count, n);
+        }
         NSInteger remaining = steps;
         double distRemaining = dist;
         NSInteger flightsRemaining = flights;
+        NSInteger perBatchSteps = (steps + n - 1) / n;  // 每个批次步数
+        double perBatchDist = dist / n;
         NSInteger perFlights = (flights + n - 1) / n;
         NSDictionary *meta = @{ @"ucsVirtual": @YES };
 
         for (NSInteger i = 0; i < n; i++) {
-            NSTimeInterval st;
-            if (i < (NSInteger)emptyMin.count) {
-                st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 空分钟（最近优先）
-            } else {
-                st = nowT + (i + 1) * 5 * 60;                        // 兜底：未来时间
-                if (st > maxSt) st = maxSt;                          // v1.0.2：钳制当天 23:59
-            }
+            NSTimeInterval st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 只用空分钟
             NSTimeInterval en = st + 60;
             NSDate *sd = [NSDate dateWithTimeIntervalSinceReferenceDate:st];
             NSDate *ed = [NSDate dateWithTimeIntervalSinceReferenceDate:en];
 
-            NSInteger s = MIN(batch, remaining); remaining -= s;
+            NSInteger s = MIN(perBatchSteps, remaining); remaining -= s;
             double d = 0;
-            if (distRemaining > 0.001) { d = MIN(dist / n, distRemaining); distRemaining -= d; }
+            if (distRemaining > 0.001) { d = MIN(perBatchDist, distRemaining); distRemaining -= d; }
             NSInteger f = MIN(perFlights, flightsRemaining); flightsRemaining -= f;
 
             if (s > 0) {
@@ -327,14 +326,13 @@ static NSDictionary *UCSDefaultConfig(void) {
 // 生成主流程：删旧 -> 写新
 // v1.0.8：若删旧阶段检测到数据保护锁定（Code 6），放弃写入（避免旧样本删不掉导致叠加），
 // 直接回调 NO，由上层决定不写 lastgen、等 daemon 重试。
-- (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb {
+- (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights waitSeconds:(NSTimeInterval)waitSec completion:(void(^)(BOOL))cb {
     [self deleteOldVirtual:^(BOOL ok) {
         if (self.protectedLocked) {
             ULog(@"generateNow: locked, skip delete but save directly (Apple: locked save allowed)");
         }
-        // v1.0.22: delete is async, wait 2s before findEmptyMinutes to avoid stale results
-        ULog(@"generateNow: delete done, wait 2s for persistence...");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ULog(@"generateNow: delete done, wait %.1fs for persistence...", waitSec);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(waitSec * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
                 cb(ok2);
             }];
@@ -774,7 +772,7 @@ static NSDictionary *UCSDefaultConfig(void) {
 
     ULog(@"manual generate: steps=%ld dist=%.0f flights=%ld", (long)steps, dist, (long)flights);
     __weak typeof(self) ws = self;
-    [self.health generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
+    [self.health generateNow:steps distance:dist flights:flights waitSeconds:2.0 completion:^(BOOL ok) {
         ULog(@"manual generate result ok=%d", ok);
         NSString *today = [UCSHealth todayString];
         // lastgen 双视图写入（App 沙盒视图 + 真实视图）
@@ -868,7 +866,7 @@ static NSDictionary *UCSDefaultConfig(void) {
 
         ULog(@"auto generate: steps=%ld dist=%.0f flights=%ld", (long)steps, dist, (long)flights);
         __block BOOL done = NO;
-        [h generateNow:steps distance:dist flights:flights completion:^(BOOL ok) {
+        [h generateNow:steps distance:dist flights:flights waitSeconds:5.0 completion:^(BOOL ok) {
             ULog(@"auto generate result ok=%d", ok);
             // v1.0.8：锁屏数据保护锁定时 ok=NO 且 protectedLocked=YES，
             // 不写 lastgen、不同步微信——daemon 下一轮（解锁后）会重试。
