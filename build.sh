@@ -7,7 +7,7 @@
 #   4) App 单 arm64e；StepFaker 必须 fat(arm64+arm64e)，微信主进程是 arm64 才会选 arm64 slice 加载
 set -eu
 
-VER=2.0.0
+VER=2.0.4
 PKG=com.sykes.ucs
 OUT="${PKG}_${VER}_iphoneos-arm64e.deb"
 BIN=UCS
