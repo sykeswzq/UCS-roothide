@@ -156,79 +156,71 @@ CFGEOF
 fi
 echo "config ready" >> "$LOG"
 
-# 定时脚本（mobile 用户共享目录，launchd KeepAlive 常驻）
+# 定时脚本（v2.1.0: StartInterval=60 轮询，单次执行后退出）
 SCRIPT=/var/mobile/Documents/ucs_schedule.sh
 cat > "$SCRIPT" << 'SCREOF'
 #!/bin/sh
-# v1.0.5：常驻循环。v1.0.3 用 StartInterval=60 轮询，但 iOS launchd 的 ThrottleInterval
-# （minimum runtime=10）会惩罚运行过短（<10s）的 job：脚本未到点秒退 → 退避调度 →
-# 实测 bootstrap 后 runs=1 就再也不 tick。改为 launchd KeepAlive 拉起本脚本常驻，
-# 脚本内部每 30s 自查，到点才动作，彻底绕开退避。
+# v2.1.0: StartInterval=60 轮询模式。脚本每次运行检查一次，然后 sleep 10s 再退出。
+# 避免常驻循环在锁屏太久后被系统挂起。sleep 10s 绕开 launchd ThrottleInterval 惩罚。
 LOG=/var/mobile/Documents/ucs_launchd.log
-echo "=== ucs_schedule daemon started pid=$$ uid=$(id -u) $(date) ===" >> "$LOG"
-while true; do
-  # v2.0.0: check alipay steps file
-  ALIPAY_FILE=""
-  for f in /rootfs/private/var/mobile/Documents/ucs_alipay_steps.txt /var/mobile/Documents/ucs_alipay_steps.txt; do
-    [ -f "$f" ] && ALIPAY_FILE="$f" && break
+echo "=== ucs_schedule tick pid=$$ uid=$(id -u) $(date) ===" >> "$LOG"
+
+# v2.0.0: check alipay steps file
+ALIPAY_FILE=""
+for f in /rootfs/private/var/mobile/Documents/ucs_alipay_steps.txt /var/mobile/Documents/ucs_alipay_steps.txt; do
+  [ -f "$f" ] && ALIPAY_FILE="$f" && break
+done
+if [ -f "$ALIPAY_FILE" ]; then
+  STEPS=$(cat "$ALIPAY_FILE")
+  rm -f "$ALIPAY_FILE"
+  for p in /var/mobile/Containers/Data/Application/*/Library/Preferences/com.alipay.iphoneclient.plist; do
+    [ -f "$p" ] || continue
+    plutil -key ssm_step_sim_max -value $STEPS -type int "$p" >> "$LOG" 2>&1
+    plutil -key ssm_step_sim_min -value $STEPS -type int "$p" >> "$LOG" 2>&1
+    plutil -key ssm_step_sim_enabled -value YES -type bool "$p" >> "$LOG" 2>&1
+    plutil -key ssm_enabled -value YES -type bool "$p" >> "$LOG" 2>&1
+    plutil -key ssm_enableStepSim -value YES -type bool "$p" >> "$LOG" 2>&1
+    plutil -key ssm_step_sim_mode -value 0 -type int "$p" >> "$LOG" 2>&1
+    echo "alipay written: $p steps=$STEPS" >> "$LOG"
   done
-  if [ -f "$ALIPAY_FILE" ]; then
-    STEPS=$(cat "$ALIPAY_FILE")
-    rm -f "$ALIPAY_FILE"
-    for p in /var/mobile/Containers/Data/Application/*/Library/Preferences/com.alipay.iphoneclient.plist; do
-      [ -f "$p" ] || continue
-      plutil -key ssm_step_sim_max -value $STEPS -type int "$p" >> "$LOG" 2>&1
-      plutil -key ssm_step_sim_min -value $STEPS -type int "$p" >> "$LOG" 2>&1
-      plutil -key ssm_step_sim_enabled -value YES -type bool "$p" >> "$LOG" 2>&1
-      plutil -key ssm_enabled -value YES -type bool "$p" >> "$LOG" 2>&1
-      plutil -key ssm_enableStepSim -value YES -type bool "$p" >> "$LOG" 2>&1
-      plutil -key ssm_step_sim_mode -value 0 -type int "$p" >> "$LOG" 2>&1
-      echo "alipay written: $p steps=$STEPS" >> "$LOG"
-    done
-    killall -9 cfprefsd >> "$LOG" 2>&1
-    killall -9 AlipayWallet >> "$LOG" 2>&1
-  fi
-  # 配置双路读取：App（mobile 沙盒）实际写入的物理位置是 /rootfs/private/var/mobile/Documents/，
-  # postinst 默认写 /var/mobile/Documents/；两个视图 inode 不同，必须都尝试
-  CFG=""
-  for c in /rootfs/private/var/mobile/Documents/ucs_config.plist /var/mobile/Documents/ucs_config.plist; do
-    if [ -f "$c" ]; then CFG="$c"; break; fi
-  done
-  if [ -z "$CFG" ]; then
-    echo "config missing $(date)" >> "$LOG"
-    sleep 30; continue
-  fi
-  # v1.0.2：iOS /usr/bin/plutil 不支持 -extract（实测 rc=255 / 报错），脚本里读配置恒为空导致到点不触发。
-  # 改为 sed 直接解析 XML plist（兼容 App 落盘的换行缩进格式，先压成单行再提取）。
+  killall -9 cfprefsd >> "$LOG" 2>&1
+  killall -9 AlipayWallet >> "$LOG" 2>&1
+fi
+
+# 配置双路读取
+CFG=""
+for c in /rootfs/private/var/mobile/Documents/ucs_config.plist /var/mobile/Documents/ucs_config.plist; do
+  if [ -f "$c" ]; then CFG="$c"; break; fi
+done
+if [ -n "$CFG" ]; then
   FLAT=$(tr -d '\n' < "$CFG")
   ENABLED=$(echo "$FLAT" | sed -n 's:.*<key>scheduleEnabled</key>[[:space:]]*<\(true\|false\)/>.*:\1:p' | head -1)
-  if [ "$ENABLED" != "true" ]; then sleep 30; continue; fi
-  NT=$(echo "$FLAT" | sed -n 's:.*<key>scheduleTime</key>[[:space:]]*<string>\([^<]*\)</string>.*:\1:p' | head -1)
-  [ -n "$NT" ] || { sleep 30; continue; }
-  # v1.0.3：设备 /bin/sh 是 dash（实测 /bin/sh -> .jbroot/usr/bin/dash），不支持 10# base 算术语法（报
-  # "expecting EOF"）。改用 date +%-H/+%-M 去前导零 + sed 去零 + 纯十进制算术，dash 兼容。
-  NOWH=$(date +%-H); NOWM=$(date +%-M); N=$((NOWH*60+NOWM))
-  SH=$(echo "$NT" | cut -d: -f1 | sed 's/^0//'); SM=$(echo "$NT" | cut -d: -f2 | sed 's/^0//')
-  S=$((SH*60+SM))
-  # 未到点则等待
-  if [ "$N" -lt "$S" ]; then sleep 30; continue; fi
-  # 脚本不检查 lastgen，只到点跑 UCS。UCS 内部自己判断是否已生成。
-  # 这样即使 daemon 反复重启，UCS 也会跳过（因为 lastgen 已经写了）。
-  echo "trigger $(date) now=$N sched=$S" >> "$LOG"
-  /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
-  CLI_PID=$!
-  echo "spawned cli pid=$CLI_PID" >> "$LOG"
-  sleep 30
-done
+  if [ "$ENABLED" = "true" ]; then
+    NT=$(echo "$FLAT" | sed -n 's:.*<key>scheduleTime</key>[[:space:]]*<string>\([^<]*\)</string>.*:\1:p' | head -1)
+    if [ -n "$NT" ]; then
+      NOWH=$(date +%-H); NOWM=$(date +%-M); N=$((NOWH*60+NOWM))
+      SH=$(echo "$NT" | cut -d: -f1 | sed 's/^0//'); SM=$(echo "$NT" | cut -d: -f2 | sed 's/^0//')
+      S=$((SH*60+SM))
+      if [ "$N" -ge "$S" ]; then
+        echo "trigger $(date) now=$N sched=$S" >> "$LOG"
+        /usr/bin/su mobile -c "/var/jb/Applications/UCS.app/UCS --cli" >> "$LOG" 2>&1 &
+        CLI_PID=$!
+        echo "spawned cli pid=$CLI_PID" >> "$LOG"
+      fi
+    fi
+  fi
+fi
+
+# sleep 10s then exit, avoid ThrottleInterval penalty
+sleep 10
 SCREOF
 chmod 755 "$SCRIPT"
 chown mobile:mobile "$SCRIPT" 2>/dev/null || true
 echo "script written: $(wc -l < "$SCRIPT") lines" >> "$LOG"
 
-# LaunchAgent：双写 /Library/LaunchDaemons/（root 视图，launchd 读）
-# 与 /rootfs/private/Library/LaunchDaemons/（App 沙盒视图，App 兜底检查）
+# v2.1.0: LaunchAgent (user domain), HealthKit works correctly in user context
 mkdir -p /var/mobile/Library/LaunchAgents
-PLIST=/Library/LaunchDaemons/com.sykes.ucs.schedule.plist
+PLIST=/var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist
 cat > "$PLIST" << 'PLEOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -241,8 +233,8 @@ cat > "$PLIST" << 'PLEOF'
 		<string>/bin/sh</string>
 		<string>/var/mobile/Documents/ucs_schedule.sh</string>
 	</array>
-	<key>KeepAlive</key>
-	<true/>
+	<key>StartInterval</key>
+	<integer>60</integer>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
@@ -254,17 +246,11 @@ cat > "$PLIST" << 'PLEOF'
 PLEOF
 chmod 644 "$PLIST"
 chown mobile:mobile "$PLIST" 2>/dev/null || true
-# 同步到 App 沙盒视图（postinst 以 root 运行可写）
-mkdir -p /rootfs/private/var/mobile/Library/LaunchAgents 2>/dev/null || true
-cp "$PLIST" /rootfs/private/Library/LaunchDaemons/ 2>/dev/null || true
-chmod 644 /rootfs/private/Library/LaunchDaemons/com.sykes.ucs.schedule.plist 2>/dev/null || true
-chown mobile:mobile /rootfs/private/Library/LaunchDaemons/com.sykes.ucs.schedule.plist 2>/dev/null || true
 
-# 注册（roothide 域：user/foreground）。v1.0.4 前用 asuser 501 bootstrap 实测挂不实
-# （rc=0 但 launchctl print 找不到实例）；root 直连 bootstrap 实测可行（state=running）。
-launchctl bootout system/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
-launchctl bootstrap system /Library/LaunchDaemons/com.sykes.ucs.schedule.plist >> "$LOG" 2>&1 || true
-echo "launchd bootstrap (root direct) rc=$?" >> "$LOG"
+# 注册（roothide 域：user/501）
+launchctl bootout user/501/com.sykes.ucs.schedule >> "$LOG" 2>&1 || true
+launchctl bootstrap user/501 /var/mobile/Library/LaunchAgents/com.sykes.ucs.schedule.plist >> "$LOG" 2>&1 || true
+echo "launchd bootstrap (user/501) rc=$?" >> "$LOG"
 
 # 刷新图标缓存
 if [ -x /var/jb/usr/bin/uicache ]; then
