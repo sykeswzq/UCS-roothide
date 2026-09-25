@@ -326,8 +326,8 @@ static NSDictionary *UCSDefaultConfig(void) {
             ULog(@"generateNow: locked, skip delete but save directly (Apple: locked save allowed)");
         }
         // v1.0.22: delete is async, wait 2s before findEmptyMinutes to avoid stale results
-        ULog(@"generateNow: delete done, wait 2s for persistence...");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ULog(@"generateNow: delete done, wait 0.5s for persistence...");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self writeSamples:steps distance:dist flights:flights completion:^(BOOL ok2) {
                 cb(ok2);
             }];
