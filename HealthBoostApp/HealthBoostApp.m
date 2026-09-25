@@ -211,32 +211,33 @@ static NSDictionary *UCSDefaultConfig(void) {
     NSInteger n = MAX(1, (steps + batch - 1) / batch);
     [self findEmptyMinutes:^(NSArray<NSDate *> *emptyMin) {
         NSMutableArray *samples = [NSMutableArray array];
-        NSCalendar *cal = [NSCalendar currentCalendar];
         NSDate *nowDate = [NSDate date];
+        NSTimeInterval nowT = [nowDate timeIntervalSinceReferenceDate];
+        NSCalendar *cal = [NSCalendar currentCalendar];
         NSDate *startOfDay = [cal startOfDayForDate:nowDate];
-        // v2.1.1：空分钟不够时不用未来时间兜底，减少批次，每个批次写更多步数
-        // 避免未来时间和之前写的样本重叠被去重
-        if ((NSInteger)emptyMin.count < n) {
-            n = MAX(1, (NSInteger)emptyMin.count);
-            ULog(@"writeSamples: emptyMin=%ld < required n, reduced to %d batches", (long)emptyMin.count, n);
-        }
+        NSDate *endOfDay = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:startOfDay options:0];
+        NSTimeInterval maxSt = [endOfDay timeIntervalSinceReferenceDate] - 60.0;   // 当天 23:59:00
         NSInteger remaining = steps;
         double distRemaining = dist;
         NSInteger flightsRemaining = flights;
-        NSInteger perBatchSteps = (steps + n - 1) / n;  // 每个批次步数
-        double perBatchDist = dist / n;
         NSInteger perFlights = (flights + n - 1) / n;
         NSDictionary *meta = @{ @"ucsVirtual": @YES };
 
         for (NSInteger i = 0; i < n; i++) {
-            NSTimeInterval st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 只用空分钟
+            NSTimeInterval st;
+            if (i < (NSInteger)emptyMin.count) {
+                st = [emptyMin[i] timeIntervalSinceReferenceDate];   // 空分钟（最近优先）
+            } else {
+                st = nowT + (i + 1) * 5 * 60;                        // 兜底：未来时间
+                if (st > maxSt) st = maxSt;                          // v1.0.2：钳制当天 23:59
+            }
             NSTimeInterval en = st + 60;
             NSDate *sd = [NSDate dateWithTimeIntervalSinceReferenceDate:st];
             NSDate *ed = [NSDate dateWithTimeIntervalSinceReferenceDate:en];
 
-            NSInteger s = MIN(perBatchSteps, remaining); remaining -= s;
+            NSInteger s = MIN(batch, remaining); remaining -= s;
             double d = 0;
-            if (distRemaining > 0.001) { d = MIN(perBatchDist, distRemaining); distRemaining -= d; }
+            if (distRemaining > 0.001) { d = MIN(dist / n, distRemaining); distRemaining -= d; }
             NSInteger f = MIN(perFlights, flightsRemaining); flightsRemaining -= f;
 
             if (s > 0) {
