@@ -265,7 +265,12 @@ static NSDictionary *UCSDefaultConfig(void) {
             if (error) ULog(@"saveObjects error: %@", error);
             NSDateFormatter *df = [[NSDateFormatter alloc] init];
         [df setDateFormat:@"yyyy-MM-dd HH:mm:ss Z"];
-ULog(@"saved %lu samples (steps=%ld dist=%.0fm flights=%ld, emptyMin=%lu)",
+        ULog(@"DEBUG now=%@", [df stringFromDate:[NSDate date]]);
+        if (samples.count > 0) {
+            HKQuantitySample *first = samples[0];
+            ULog(@"DEBUG firstSample=%@", [df stringFromDate:first.startDate]);
+        }
+        ULog(@"saved %lu samples (steps=%ld dist=%.0fm flights=%ld, emptyMin=%lu)",
                  (unsigned long)samples.count, (long)steps, dist, (long)flights, (unsigned long)emptyMin.count);
             cb(success);
         }];
