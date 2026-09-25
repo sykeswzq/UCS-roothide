@@ -103,7 +103,7 @@ static NSDictionary *UCSDefaultConfig(void) {
 @property (nonatomic, assign) BOOL protectedLocked;
 - (BOOL)isAuthorized;
 - (void)requestAuth:(void(^)(BOOL))cb;
-- (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights completion:(void(^)(BOOL))cb;
+- (void)generateNow:(NSInteger)steps distance:(double)dist flights:(NSInteger)flights waitSeconds:(NSTimeInterval)waitSec completion:(void(^)(BOOL))cb;
 + (NSString *)todayString;
 + (void)syncWeChat;
 + (void)writeStepsFile:(NSInteger)steps;
